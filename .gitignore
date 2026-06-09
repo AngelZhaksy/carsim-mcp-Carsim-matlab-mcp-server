@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# CarSim parsfile backups / run artifacts
+*.bak
+diag_*.py
+diag_server_stderr.log
+_*_demo/
+_verify_*/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

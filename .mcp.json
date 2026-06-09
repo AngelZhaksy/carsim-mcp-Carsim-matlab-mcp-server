@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "carsim": {
+      "command": "python",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server.py"],
+      "env": {
+        "CARSIM_ROOT": "E:\\Carsim2024",
+        "MATLAB_EXE": "E:\\Program Files\\MATLAB\\R2023b\\bin\\matlab.exe"
+      }
+    }
+  }
+}

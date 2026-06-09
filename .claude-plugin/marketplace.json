@@ -1,0 +1,18 @@
+{
+  "name": "carsim-mcp",
+  "description": "CarSim 2024 <-> MATLAB/Simulink co-simulation tooling for Claude Code.",
+  "owner": {
+    "name": "AngelZhaksy",
+    "url": "https://github.com/AngelZhaksy"
+  },
+  "plugins": [
+    {
+      "name": "carsim-mcp",
+      "source": "./",
+      "description": "CarSim 2024 <-> MATLAB/Simulink co-simulation MCP server for Claude Code.",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["carsim", "matlab", "simulink", "co-simulation", "vehicle-dynamics"]
+    }
+  ]
+}

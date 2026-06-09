@@ -1,0 +1,13 @@
+{
+  "name": "carsim-mcp",
+  "description": "Drive CarSim 2024 from Claude Code: edit parameters, run the headless solver, and run CarSim<->MATLAB/Simulink co-simulation (.m and .slx). MATLAB execution is delegated to the official MATLAB MCP.",
+  "version": "1.0.0",
+  "author": {
+    "name": "AngelZhaksy",
+    "url": "https://github.com/AngelZhaksy"
+  },
+  "homepage": "https://github.com/AngelZhaksy/carsim-mcp",
+  "repository": "https://github.com/AngelZhaksy/carsim-mcp",
+  "license": "MIT",
+  "keywords": ["carsim", "matlab", "simulink", "co-simulation", "vehicle-dynamics", "mcp"]
+}
