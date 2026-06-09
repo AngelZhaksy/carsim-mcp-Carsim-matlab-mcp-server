@@ -60,7 +60,7 @@ From a local clone / unzipped folder:
 From GitHub (after you push this repo):
 
 ```shell
-/plugin marketplace add AngelZhaksy/carsim-mcp
+/plugin marketplace add AngelZhaksy/carsim-mcp-Carsim-matlab-mcp-server
 /plugin install carsim-mcp@carsim-mcp
 ```
 

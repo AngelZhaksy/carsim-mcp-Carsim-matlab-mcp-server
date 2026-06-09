@@ -6,8 +6,8 @@
     "name": "AngelZhaksy",
     "url": "https://github.com/AngelZhaksy"
   },
-  "homepage": "https://github.com/AngelZhaksy/carsim-mcp",
-  "repository": "https://github.com/AngelZhaksy/carsim-mcp",
+  "homepage": "https://github.com/AngelZhaksy/carsim-mcp-Carsim-matlab-mcp-server",
+  "repository": "https://github.com/AngelZhaksy/carsim-mcp-Carsim-matlab-mcp-server",
   "license": "MIT",
   "keywords": ["carsim", "matlab", "simulink", "co-simulation", "vehicle-dynamics", "mcp"]
 }
