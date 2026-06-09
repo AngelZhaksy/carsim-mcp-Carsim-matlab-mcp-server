@@ -1,6 +1,6 @@
 # CarSim MCP — a Claude Code plugin
 
-Drive **CarSim (test in 2024)** from Claude Code (or any MCP client): edit parameters, run the
+Drive **CarSim (test in version 2024)** from Claude Code (or any MCP client): edit parameters, run the
 headless solver, and run **CarSim ↔ MATLAB/Simulink co-simulation** (both `.m`
 controllers and `.slx` models). It ships as a Claude Code **plugin** with a bundled
 **MCP server**.
@@ -9,7 +9,7 @@ CarSim-domain work lives in this server; **MATLAB execution is delegated to the
 official MATLAB MCP** (a warm, visible MATLAB session). The two hand off over the
 filesystem, orchestrated by the agent.
 
-> ⚠️ **You need your own valid CarSim (test in 2024) and MATLAB licenses.** This project does
+> ⚠️ **You need your own valid CarSim (test in version 2024) and MATLAB licenses.** This project does
 > not include or circumvent any license. On a license-managed CarSim, start the
 > CarSim License Manager (`<CarSim>\Programs\cslm.exe`) **before** running the
 > solver/co-sim, or CarSim returns a FlexNet error.
@@ -36,7 +36,7 @@ The recommended co-sim path runs the driver through the **MATLAB MCP**, not this
 
 ## Requirements
 
-- **CarSim (test in 2024)** (Windows) with a valid license. Start `cslm.exe` first if license-managed.
+- **CarSim (test in version 2024)** (Windows) with a valid license. Start `cslm.exe` first if license-managed.
 - **MATLAB** (tested R2023b) + Simulink, with a valid license.
 - **Python 3.10+** with `mcp[cli]` and `scipy` (see [`requirements.txt`](requirements.txt)).
 - The official **MATLAB MCP** server connected in your MCP client (for the co-sim run step).
