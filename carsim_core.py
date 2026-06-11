@@ -495,7 +495,15 @@ def read_results(path: str, max_channels: int = 50) -> dict:
         raw = np.fromfile(str(data_file), dtype="<f4")
         nchan = len(names)
         nsamp = raw.size // nchan if nchan else 0
-        mat = raw[: nsamp * nchan].reshape(nsamp, nchan)  # sample-major frames
+        # CarSim's .vsb starts with a small fixed header, so the total float
+        # count is NOT an exact multiple of nchan (v2024: 6 leading floats /
+        # 24 bytes). Skip it; otherwise every column is shifted and the channel
+        # names get mislabeled onto the wrong data (e.g. Vx reading 359 km/h).
+        # The header length is the remainder; data after it is row-major
+        # (sample-major) frames. Verified against a Double Lane Change run:
+        # Vx -> 72 km/h, Station -> 0..199 m, Bk_Stat -> 0.
+        header = raw.size - nsamp * nchan
+        mat = raw[header: header + nsamp * nchan].reshape(nsamp, nchan)
 
         channels = {}
         tvec = xstart + xstep * np.arange(nsamp)
