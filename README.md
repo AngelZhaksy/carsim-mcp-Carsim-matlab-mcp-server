@@ -167,9 +167,12 @@ carsim.read_results(path="...\\Results\\Run_<id>\\LastRun.vs")   # -> channels m
 ```
 
 `kind="mfile"` wraps your own MATLAB `.m` controller instead of an `.slx`.
-A full worked example and parameter-editing recipes are in
-[`docs/carsim-matlab.md`](docs/carsim-matlab.md). Architecture is in
-[`docs/DESIGN.md`](docs/DESIGN.md).
+
+- **[`docs/carsim-mcp-use.md`](docs/carsim-mcp-use.md)** — hands-on usage guide + a
+  **pitfalls table** (single-space simfile, `.vsb` header, `Run_all.par` vs `Runs\`,
+  license, read-only files…). Read this before your first headless run.
+- [`docs/carsim-matlab.md`](docs/carsim-matlab.md) — co-simulation recipes & parameter editing.
+- [`docs/DESIGN.md`](docs/DESIGN.md) — architecture.
 
 > The CarSim solver runs as a DLL **inside** Simulink via the `vs_sf` S-Function —
 > you do **not** need the CarSim GUI open to co-simulate.
