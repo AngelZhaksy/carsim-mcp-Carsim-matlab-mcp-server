@@ -19,7 +19,18 @@ async def main():
             tools = await session.list_tools()
             names = [t.name for t in tools.tools]
             print("TOOLS:", names)
-            assert "carsim_info" in names and len(names) == 10
+            # 10 core + 7 database/dictionary tools.
+            expected = {
+                "carsim_info", "launch_gui", "list_examples", "read_parsfile",
+                "write_parsfile", "run_solver", "generate_simfile",
+                "scaffold_cosim", "read_results", "run_cosim_headless",
+                "list_libraries", "browse_library", "find_dataset",
+                "get_dataset", "set_dataset", "describe_keyword",
+                "build_keyword_dictionary",
+            }
+            missing = expected - set(names)
+            assert not missing, f"missing tools: {missing}"
+            assert len(names) == len(expected), f"tool count {len(names)} != {len(expected)}"
 
             result = await session.call_tool("carsim_info", {})
             payload = json.loads(result.content[0].text)

@@ -64,10 +64,67 @@ def test_scaffold_mfile():
     print("scaffold(mfile): ok")
 
 
+def test_db_navigation():
+    """Database navigation + structured read. Skipped if no CarSim DB present."""
+    try:
+        cc._db_dir()
+    except FileNotFoundError:
+        print("db_navigation: skipped (no CarSim database on this machine)")
+        return
+    libs = cc.list_libraries()
+    assert libs["n"] > 0, "no libraries found"
+    hits = cc.find_dataset("sprung mass", limit=5)
+    if hits["n"]:
+        f = hits["results"][0]["file"]
+        ds = cc.get_dataset(f, annotate=True)
+        assert ds["identity"]["library"], "identity not parsed"
+        assert ds["n_params"] > 0, "no params parsed"
+    print(f"db_navigation: ok ({libs['n']} libraries)")
+
+
+def test_set_dataset_roundtrip():
+    """set_dataset on a writable copy of a real dataset (handles read-only src)."""
+    import os
+    import shutil
+    import stat
+    try:
+        cc._db_dir()
+    except FileNotFoundError:
+        print("set_dataset: skipped (no CarSim database)")
+        return
+    hits = cc.find_dataset("sprung mass", limit=1)
+    if not hits["n"]:
+        print("set_dataset: skipped (no sprung-mass dataset)")
+        return
+    with tempfile.TemporaryDirectory() as d:
+        tmp = str(Path(d) / "ds.par")
+        shutil.copy2(hits["results"][0]["file"], tmp)
+        os.chmod(tmp, os.stat(tmp).st_mode | stat.S_IWRITE)
+        res = cc.set_dataset(tmp, {"M_SU": "1500"})
+        assert "M_SU" in res["changed"], res
+        assert cc.get_dataset(tmp, annotate=False)["params"]["M_SU"]["value"] == "1500"
+    print("set_dataset: ok")
+
+
+def test_keyword_dictionary():
+    """Keyword dictionary lookup. Skipped if not built yet."""
+    d = cc._load_keyword_dict()
+    if not d:
+        print("keyword_dict: skipped (run build_keyword_dictionary() first)")
+        return
+    hit = cc.describe_keyword("M_SU")
+    assert hit["known"], hit
+    assert hit.get("unit") == "kg", hit
+    print(f"keyword_dict: ok ({len(d)} keywords; M_SU = {hit.get('unit')})")
+
+
 if __name__ == "__main__":
     test_resolve_paths()
     test_parsfile()
     test_examples()
     test_scaffold_slx()
     test_scaffold_mfile()
+    test_db_navigation()
+    test_set_dataset_roundtrip()
+    test_keyword_dictionary()
     print("\nALL SMOKE TESTS PASSED")

@@ -16,14 +16,33 @@ filesystem, orchestrated by the agent.
 
 ---
 
-## Features / tools (10)
+## Features / tools (17)
+
+**Toolchain & examples**
 
 | Tool | What it does |
 |---|---|
 | `carsim_info` | Resolve & existence-check every path (root, GUI, CLI solver, `vs_sf` mex, MATLAB, DB). The "is it wired up" probe. |
-| `launch_gui` | Open the CarSim GUI (optional; **not** needed for solving/co-sim). |
+| `launch_gui` | Open the CarSim GUI (optional; **not** needed for editing params or co-sim). |
 | `list_examples` | List shipped CPAR archives + Simulink example models. |
-| `read_parsfile` / `write_parsfile` | Read/edit parameters: vehicle params, I/O channels, dataset links (auto `.bak`). |
+
+**Database navigation — find & edit any GUI parameter from code**
+
+| Tool | What it does |
+|---|---|
+| `list_libraries` | List the GUI libraries (DATA subfolders: Suspensions, Powertrain, Vehicles, Steering, Tires, IO_Channels…) with dataset counts + categories. |
+| `browse_library` | List datasets in a library/category, each with its GUI identity + file path. |
+| `find_dataset` | Fuzzy-search the whole database by GUI text — "where do I set X" (`find_dataset('motor')`, `find_dataset('sprung mass')`). |
+| `get_dataset` | Structured read: identity + scalar `params` + `tables`, each **annotated with meaning + unit** from the keyword dictionary. |
+| `set_dataset` | Edit scalar params (`{M_SU: 1500, H_CG_SU: 530}`), bump `#Modified`, auto `.bak`. Handles read-only library files. |
+| `describe_keyword` | Look up a keyword's meaning + unit (`describe_keyword('M_SU')` → sprung mass, kg). |
+| `build_keyword_dictionary` | Build the local keyword dictionary from CarSim's own echo files (run once per install). |
+| `read_parsfile` / `write_parsfile` | Low-level keyword read/edit (auto `.bak`). `get_dataset`/`set_dataset` are the friendlier layer. |
+
+**Solve & co-simulate**
+
+| Tool | What it does |
+|---|---|
 | `run_solver` | Headless CarSim solve via the CLI solver wrapper (no MATLAB, no GUI). |
 | `generate_simfile` | Produce a co-sim `simfile` by templating from a GUI-generated one. |
 | `scaffold_cosim` | Generate a ready-to-run co-sim package (`.slx` or `.m` driver + `run_cosim.m`). |
@@ -31,6 +50,30 @@ filesystem, orchestrated by the agent.
 | `run_cosim_headless` | Optional fallback: run a driver via `matlab -batch` (unattended). |
 
 The recommended co-sim path runs the driver through the **MATLAB MCP**, not this fallback.
+
+### Editing CarSim parameters without the GUI
+
+CarSim's GUI is closed-source, but its **data is not** — every GUI dataset is a plain-text
+`.par` file under `DATA\<Library>\<Category>\`. So the agent edits suspension geometry,
+sprung mass, motor/engine maps, I/O channels, etc. **directly**, no mouse automation:
+
+```text
+find_dataset("sprung mass")          # -> the Vehicles\Sprung_Mass datasets + paths
+get_dataset(path)                    # -> M_SU=1020 [kg], H_CG_SU=375 [mm], IZZ_SU=… (annotated)
+set_dataset(path, {"M_SU": "1500"})  # -> edits + .bak + #Modified bump
+```
+
+**Keyword dictionary (one-time, per install).** `get_dataset`/`describe_keyword` annotate
+keywords with meaning + units harvested from CarSim's own solver echo files
+(`DATA\Results\**\*_echo.par`). Build it once:
+
+```text
+build_keyword_dictionary()           # -> keywords.json (local; ~2000+ keywords)
+```
+
+> `keywords.json` is a **local artifact** (it contains CarSim's proprietary parameter
+> documentation) and is `.gitignore`d — it is generated on each user's own install, never
+> redistributed. If `DATA\Results` is empty, run any CarSim example once to create echo files.
 
 ---
 

@@ -13,6 +13,11 @@ diag_server_stderr.log
 _*_demo/
 _verify_*/
 
+# Locally-built keyword dictionary: harvested from CarSim's own echo files, which
+# contain CarSim's proprietary parameter documentation. Generated per-install via
+# build_keyword_dictionary(); never redistributed.
+keywords.json
+
 # OS / editor
 .DS_Store
 Thumbs.db

@@ -15,6 +15,7 @@ import os
 import re
 import glob
 import json
+import stat
 import shutil
 import subprocess
 from pathlib import Path
@@ -160,6 +161,20 @@ def resolve_paths() -> dict:
 _COMMENT_PREFIXES = ("!",)
 
 
+def _ensure_writable(path: Path) -> None:
+    """Clear the read-only attribute so the file can be overwritten.
+
+    Shipped CarSim library datasets are read-only on disk; the GUI clears this on
+    save, and so do we. A .bak backup is always written first by the caller, so
+    the original content remains recoverable.
+    """
+    try:
+        if path.exists() and not (os.stat(path).st_mode & stat.S_IWRITE):
+            os.chmod(path, os.stat(path).st_mode | stat.S_IWRITE)
+    except OSError:
+        pass
+
+
 def read_parsfile(path: str) -> dict:
     """Parse a CarSim parsfile into {path, keywords, raw_lines}.
 
@@ -219,6 +234,8 @@ def write_parsfile(path: str, edits: dict, mode: str = "set", backup: bool = Tru
     if backup:
         backup_path = str(p) + ".bak"
         shutil.copy2(p, backup_path)
+        _ensure_writable(Path(backup_path))  # backups of RO files are RO too
+    _ensure_writable(p)
     p.write_text("\n".join(lines) + "\n", encoding="latin-1")
     return {"changed": changed, "added": added, "backup": backup_path}
 
@@ -503,7 +520,12 @@ def read_results(path: str, max_channels: int = 50) -> dict:
 # --------------------------------------------------------------------------- #
 
 def launch_gui(dataset: str | None = None) -> dict:
-    """Launch CarSim_64.exe (non-blocking). Returns the new process pid."""
+    """Launch CarSim_64.exe (non-blocking). Returns the new process pid.
+
+    Note: CarSim_64.exe has no documented CLI to open a *specific* screen; it
+    opens to the last-used Run Control. For programmatic parameter work, edit the
+    underlying parsfiles directly (get_dataset / set_dataset) -- no GUI needed.
+    """
     paths = resolve_paths()
     gui = paths["gui_exe"]["path"]
     if not Path(gui).exists():
@@ -513,3 +535,457 @@ def launch_gui(dataset: str | None = None) -> dict:
         args.append(dataset)
     proc = subprocess.Popen(args, cwd=str(Path(gui).parent))
     return {"pid": proc.pid, "launched": gui, "dataset": dataset}
+
+
+# --------------------------------------------------------------------------- #
+# CarSim database navigation (GUI libraries -> parsfiles)
+# --------------------------------------------------------------------------- #
+# Every dataset visible in the CarSim GUI is a plain-text .par file under
+# <DB>\<Library>\[<Category>\]<file>.par. The GUI is closed-source, but the DATA
+# is not: each .par carries its own GUI breadcrumb on line ~2 as
+#   #FullDataName <Library>`<DataSet>`<Category>
+# and a metadata block (#Library/#DataSet/#Category/#FileID/#Modified) near the
+# end. We use those to give the agent a searchable catalog of the whole database.
+
+# DATA subfolders that are bookkeeping, not GUI libraries.
+_NON_LIBRARY_DIRS = {
+    "Results", "Runs", "Log", "slprj", "Animator", "Plot", "Output",
+    "Preferences", "Configuration", "Extensions",
+}
+
+
+def _db_dir() -> Path:
+    """Resolve the CarSim working database directory or raise."""
+    db = resolve_paths()["carsim_db"]["path"]
+    if not db or not Path(db).is_dir():
+        raise FileNotFoundError(
+            "CarSim database not found. Set CARSIM_DB or CARSIM_ROOT so that "
+            "<root>\\DATA exists.")
+    return Path(db)
+
+
+def _read_head(path: Path, n: int = 8) -> list[str]:
+    """Read the first n lines of a file cheaply (latin-1)."""
+    out = []
+    with path.open("r", encoding="latin-1", errors="replace") as fh:
+        for _ in range(n):
+            line = fh.readline()
+            if not line:
+                break
+            out.append(line.rstrip("\n"))
+    return out
+
+
+def parse_identity(path: str | Path) -> dict:
+    """Extract the GUI identity (library/dataset/category) of a .par file.
+
+    Prefers the fast top-of-file `#FullDataName A`B`C` line; falls back to the
+    `#Library/#DataSet/#Category` metadata block if needed.
+    """
+    p = Path(path)
+    library = dataset = category = None
+    file_id = modified = None
+
+    head = _read_head(p, 8)
+    for line in head:
+        if line.startswith("#FullDataName"):
+            rest = line[len("#FullDataName"):].strip()
+            parts = rest.split("`")
+            if len(parts) >= 1:
+                library = parts[0].strip() or None
+            if len(parts) >= 2:
+                dataset = parts[1].strip() or None
+            if len(parts) >= 3:
+                category = parts[2].strip() or None
+            break
+
+    if library is None or file_id is None or modified is None:
+        # Scan the (small) metadata block, usually near the file end.
+        try:
+            for line in p.read_text(encoding="latin-1", errors="replace").splitlines():
+                if line.startswith("#Library") and ":" in line:
+                    library = library or line.split(":", 1)[1].strip()
+                elif line.startswith("#DataSet") and ":" in line:
+                    dataset = dataset or line.split(":", 1)[1].strip()
+                elif line.startswith("#Category") and ":" in line:
+                    category = category or line.split(":", 1)[1].strip()
+                elif line.startswith("#FileID") and ":" in line:
+                    file_id = line.split(":", 1)[1].strip()
+                elif line.startswith("#Modified") and ":" in line:
+                    modified = line.split(":", 1)[1].strip()
+        except OSError:
+            pass
+
+    return {"path": str(p), "library": library, "dataset": dataset,
+            "category": category, "file_id": file_id, "modified": modified}
+
+
+def list_libraries() -> dict:
+    """List CarSim GUI libraries (DATA subfolders that hold datasets).
+
+    Returns {libraries:[{name, n_datasets, categories:[...]}], db, n}.
+    """
+    db = _db_dir()
+    libs = []
+    for entry in sorted(db.iterdir()):
+        if not entry.is_dir() or entry.name in _NON_LIBRARY_DIRS:
+            continue
+        pars = list(entry.rglob("*.par"))
+        if not pars:
+            continue
+        cats = sorted({c.name for c in entry.iterdir() if c.is_dir()})
+        libs.append({"name": entry.name, "n_datasets": len(pars),
+                     "categories": cats})
+    return {"db": str(db), "n": len(libs), "libraries": libs}
+
+
+def browse_library(library: str, category: str | None = None,
+                   limit: int = 300) -> dict:
+    """List datasets in a library (optionally filtered to a category subfolder).
+
+    `library` is a DATA subfolder name (e.g. 'Suspensions', 'Powertrain',
+    'Vehicles'). Returns each dataset's GUI identity + file path.
+    """
+    db = _db_dir()
+    base = db / library
+    if not base.is_dir():
+        avail = [e.name for e in db.iterdir()
+                 if e.is_dir() and e.name not in _NON_LIBRARY_DIRS]
+        raise FileNotFoundError(
+            f"library '{library}' not found under {db}. "
+            f"Available: {', '.join(sorted(avail))}")
+    search = base / category if category else base
+    if not search.is_dir():
+        cats = sorted(c.name for c in base.iterdir() if c.is_dir())
+        raise FileNotFoundError(
+            f"category '{category}' not in '{library}'. Available: {', '.join(cats)}")
+
+    datasets = []
+    for f in sorted(search.rglob("*.par")):
+        ident = parse_identity(f)
+        datasets.append({"file": str(f), "dataset": ident["dataset"],
+                         "category": ident["category"],
+                         "library": ident["library"]})
+        if len(datasets) >= limit:
+            break
+    return {"library": library, "category": category,
+            "n": len(datasets), "datasets": datasets}
+
+
+def find_dataset(query: str, limit: int = 50) -> dict:
+    """Fuzzy-search every dataset in the database by GUI identity text.
+
+    Matches case-insensitively against library/dataset/category names. Useful
+    for 'where do I set X' questions, e.g. find_dataset('motor') or
+    find_dataset('sprung mass').
+    """
+    db = _db_dir()
+    terms = [t for t in query.lower().split() if t]
+    hits = []
+    for f in db.rglob("*.par"):
+        # Skip run-result echoes etc.
+        if any(part in _NON_LIBRARY_DIRS for part in f.parts):
+            continue
+        ident = parse_identity(f)
+        hay = " ".join(filter(None, (ident["library"], ident["dataset"],
+                                     ident["category"], f.stem))).lower()
+        if all(t in hay for t in terms):
+            hits.append({"file": str(f), "library": ident["library"],
+                         "dataset": ident["dataset"],
+                         "category": ident["category"]})
+            if len(hits) >= limit:
+                break
+    return {"query": query, "n": len(hits), "results": hits}
+
+
+# --------------------------------------------------------------------------- #
+# Structured dataset read / write (identity + scalars + tables, annotated)
+# --------------------------------------------------------------------------- #
+
+def _is_data_row(s: str) -> bool:
+    """True if a line looks like CarSim table data (numeric first char)."""
+    if not s:
+        return False
+    return s[0].isdigit() or s[0] in "+-."
+
+
+_STRUCTURAL = {"PARSFILE", "END"}
+
+
+def _parse_dataset_body(lines: list[str]) -> tuple[dict, dict]:
+    """Split a parsfile body into scalar keywords and table blocks.
+
+    Returns (scalars, tables) where scalars maps KEYWORD -> [values] and tables
+    maps KEYWORD -> {method, rows:[...]}. A keyword is treated as a table header
+    when its next meaningful line is a data row or ENDTABLE.
+    """
+    scalars: dict[str, list[str]] = {}
+    tables: dict[str, dict] = {}
+    n = len(lines)
+    i = 0
+    while i < n:
+        s = lines[i].strip()
+        if (not s or s.startswith("!") or s.startswith("#")
+                or s in _STRUCTURAL):
+            i += 1
+            continue
+        parts = s.split(None, 1)
+        kw = parts[0]
+        val = parts[1].strip() if len(parts) > 1 else ""
+
+        # Peek at the next meaningful line to detect a table header.
+        j = i + 1
+        while j < n and (not lines[j].strip() or lines[j].strip().startswith("!")):
+            j += 1
+        nxt = lines[j].strip() if j < n else ""
+        if _is_data_row(nxt) or nxt.startswith("ENDTABLE"):
+            rows = []
+            k = j
+            while k < n:
+                t = lines[k].strip()
+                if t.startswith("ENDTABLE"):
+                    break
+                if t and not t.startswith("!"):
+                    rows.append(t)
+                k += 1
+            tables.setdefault(kw, {"method": val, "rows": rows})
+            i = k + 1
+            continue
+        scalars.setdefault(kw, []).append(val)
+        i += 1
+    return scalars, tables
+
+
+def get_dataset(path: str, annotate: bool = True, max_tables: int = 40) -> dict:
+    """Read a dataset parsfile into identity + scalar params + tables.
+
+    With annotate=True, each scalar keyword is tagged with {desc, unit} from the
+    locally-built keyword dictionary (see build_keyword_dictionary) when known.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"dataset not found: {path}")
+    lines = p.read_text(encoding="latin-1", errors="replace").splitlines()
+    scalars, tables = _parse_dataset_body(lines)
+    ident = parse_identity(p)
+
+    kdict = _load_keyword_dict() if annotate else {}
+    params = {}
+    for kw, vals in scalars.items():
+        entry = {"value": vals[0] if len(vals) == 1 else vals}
+        if annotate:
+            meta = kdict.get(_kw_base(kw))
+            if meta:
+                entry["desc"] = meta.get("desc")
+                if meta.get("unit"):
+                    entry["unit"] = meta["unit"]
+        params[kw] = entry
+
+    table_out = {}
+    for i, (kw, tb) in enumerate(tables.items()):
+        if i >= max_tables:
+            break
+        item = {"method": tb["method"], "n_rows": len(tb["rows"]),
+                "rows": tb["rows"][:200]}
+        if annotate:
+            meta = kdict.get(_kw_base(kw))
+            if meta:
+                item["desc"] = meta.get("desc")
+                if meta.get("unit"):
+                    item["unit"] = meta["unit"]
+        table_out[kw] = item
+
+    return {"path": str(p), "identity": ident,
+            "n_params": len(params), "params": params,
+            "n_tables": len(tables), "tables": table_out}
+
+
+def set_dataset(path: str, edits: dict, backup: bool = True) -> dict:
+    """Edit scalar keyword values in a dataset and refresh its #Modified stamp.
+
+    Thin wrapper over write_parsfile that also bumps the #Modified metadata line
+    so the change is visible in the GUI's dataset list. Returns write_parsfile's
+    result plus {modified_stamp}.
+    """
+    res = write_parsfile(path, edits, mode="set", backup=backup)
+
+    # Bump #Modified to now (CarSim format: MM-DD-YYYY HH:MM:SS).
+    import time
+    stamp = time.strftime("%m-%d-%Y %H:%M:%S")
+    p = Path(path)
+    lines = p.read_text(encoding="latin-1", errors="replace").splitlines()
+    bumped = False
+    for idx, line in enumerate(lines):
+        if line.startswith("#Modified") and ":" in line:
+            head = line.split(":", 1)[0]
+            lines[idx] = f"{head}: {stamp}"
+            bumped = True
+            break
+    if bumped:
+        p.write_text("\n".join(lines) + "\n", encoding="latin-1")
+    res["modified_stamp"] = stamp if bumped else None
+    return res
+
+
+# --------------------------------------------------------------------------- #
+# Keyword dictionary (built locally from CarSim's own echo files)
+# --------------------------------------------------------------------------- #
+# CarSim's solver writes Results\<run>\LastRun_echo.par files where every active
+# parameter is echoed with its units and description:
+#     M_SU   1370 ; kg ! Mass of unladen sprung mass (SU) [I]
+# We harvest the union across all echo files into a keyword dictionary. This is
+# authoritative (CarSim's own text) and version-correct for *this* install.
+#
+# Copyright note: the descriptions are CarSim's proprietary documentation, so the
+# generated keywords.json is a LOCAL artifact (.gitignored) -- never redistributed.
+
+KEYWORD_DICT_PATH = MODULE_DIR / "keywords.json"
+
+# Echo line: KEYWORD  value [; unit] [! description], with `! ...` continuations.
+_ECHO_DEF_RE = re.compile(r"^(?P<kw>[A-Za-z_][A-Za-z0-9_().\-]*)\s+(?P<rest>.*)$")
+_DESC_FLAGS_RE = re.compile(r"\s*\[[DIL]\]\s*$")  # trailing [D]/[I]/[L] markers
+
+_kw_dict_cache: dict | None = None
+
+
+def _kw_base(keyword: str) -> str:
+    """Normalize a keyword for dictionary lookup: drop array indices, upper-case.
+
+    e.g. 'OPT_ENGINE_PITCH_REACTION(1)' -> 'OPT_ENGINE_PITCH_REACTION'.
+    """
+    return re.sub(r"\(.*\)$", "", keyword).strip().upper()
+
+
+def parse_echo_dictionary(echo_path: str | Path) -> dict:
+    """Parse one *_echo.par into {KEYWORD: {desc, unit}} (best-effort)."""
+    out: dict[str, dict] = {}
+    last_kw = None
+    try:
+        lines = Path(echo_path).read_text(encoding="latin-1",
+                                          errors="replace").splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        if not line.strip():
+            last_kw = None
+            continue
+        # Continuation: indented '! more description'.
+        if line[0] in " \t" and line.lstrip().startswith("!"):
+            if last_kw and out.get(last_kw):
+                extra = line.lstrip()[1:].strip()
+                extra = _DESC_FLAGS_RE.sub("", extra)
+                if extra:
+                    out[last_kw]["desc"] = (out[last_kw]["desc"] + " " + extra).strip()
+            continue
+        if line[0] in " \t!#":
+            last_kw = None
+            continue
+        m = _ECHO_DEF_RE.match(line)
+        if not m:
+            last_kw = None
+            continue
+        kw = _kw_base(m.group("kw"))
+        rest = m.group("rest")
+        if kw in _STRUCTURAL or kw in ("DATASET_TITLE", "CATEGORY", "TITLE",
+                                       "MODEL_LAYOUT"):
+            last_kw = None
+            continue
+        unit = None
+        desc = None
+        # Split description off first ' ! '.
+        if "!" in rest:
+            left, desc = rest.split("!", 1)
+            desc = _DESC_FLAGS_RE.sub("", desc.strip())
+        else:
+            left = rest
+        # Unit is the token after ';' in the left part.
+        if ";" in left:
+            _, unit_part = left.split(";", 1)
+            unit = unit_part.strip() or None
+            if unit in ("-", "--"):
+                unit = None
+        if desc or unit:
+            prev = out.get(kw)
+            # Keep the richest entry seen across echoes.
+            if prev is None or (not prev.get("desc") and desc) or \
+               (not prev.get("unit") and unit):
+                out[kw] = {"desc": desc or (prev or {}).get("desc"),
+                           "unit": unit or (prev or {}).get("unit")}
+            last_kw = kw
+        else:
+            last_kw = None
+    return out
+
+
+def build_keyword_dictionary(refresh: bool = True, max_files: int = 0) -> dict:
+    """Build keywords.json from all Results\\**\\*_echo.par on THIS install.
+
+    refresh=False just reports the existing dictionary. max_files>0 limits how
+    many echo files are scanned (for a quick partial build). Returns stats.
+    """
+    global _kw_dict_cache
+    if not refresh and KEYWORD_DICT_PATH.exists():
+        d = json.loads(KEYWORD_DICT_PATH.read_text(encoding="utf-8"))
+        _kw_dict_cache = d
+        return {"path": str(KEYWORD_DICT_PATH), "n_keywords": len(d),
+                "refreshed": False}
+
+    db = _db_dir()
+    results = db / "Results"
+    echoes = sorted(results.rglob("*_echo.par")) if results.is_dir() else []
+    if max_files:
+        echoes = echoes[:max_files]
+
+    merged: dict[str, dict] = {}
+    for e in echoes:
+        for kw, meta in parse_echo_dictionary(e).items():
+            cur = merged.get(kw)
+            if cur is None:
+                merged[kw] = meta
+            else:
+                if not cur.get("desc") and meta.get("desc"):
+                    cur["desc"] = meta["desc"]
+                if not cur.get("unit") and meta.get("unit"):
+                    cur["unit"] = meta["unit"]
+
+    KEYWORD_DICT_PATH.write_text(
+        json.dumps(merged, ensure_ascii=False, indent=0, sort_keys=True),
+        encoding="utf-8")
+    _kw_dict_cache = merged
+    return {"path": str(KEYWORD_DICT_PATH), "n_keywords": len(merged),
+            "n_echo_files": len(echoes), "refreshed": True}
+
+
+def _load_keyword_dict() -> dict:
+    """Load (and cache) the keyword dictionary; empty dict if not built yet."""
+    global _kw_dict_cache
+    if _kw_dict_cache is not None:
+        return _kw_dict_cache
+    if KEYWORD_DICT_PATH.exists():
+        try:
+            _kw_dict_cache = json.loads(KEYWORD_DICT_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            _kw_dict_cache = {}
+    else:
+        _kw_dict_cache = {}
+    return _kw_dict_cache
+
+
+def describe_keyword(keyword: str) -> dict:
+    """Look up a parsfile keyword's meaning + unit in the local dictionary.
+
+    Substring fallback: if the exact keyword is unknown, return up to 15 keywords
+    that contain the query, so the agent can discover the right name.
+    """
+    d = _load_keyword_dict()
+    if not d:
+        return {"keyword": keyword, "known": False,
+                "note": "keyword dictionary not built yet; run "
+                        "build_keyword_dictionary() once (needs CarSim run "
+                        "results in DATA\\Results)."}
+    base = _kw_base(keyword)
+    if base in d:
+        return {"keyword": base, "known": True, **d[base]}
+    sub = [k for k in d if base in k][:15]
+    return {"keyword": base, "known": False, "similar": sub,
+            "n_in_dict": len(d)}

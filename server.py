@@ -107,5 +107,82 @@ def run_cosim_headless(runner_m: str, timeout: int = 600) -> dict:
     return cc.run_cosim_headless(runner_m, timeout=timeout)
 
 
+# --------------------------------------------------------------------------- #
+# Database navigation: browse/find the CarSim GUI libraries from code
+# --------------------------------------------------------------------------- #
+
+@mcp.tool()
+def list_libraries() -> dict:
+    """List the CarSim GUI libraries (DATA subfolders that hold datasets, e.g.
+    Suspensions, Powertrain, Vehicles, Steering, Tires, IO_Channels). Each entry
+    has {name, n_datasets, categories}. Start here to discover where a parameter
+    lives. Returns {db, n, libraries}."""
+    return cc.list_libraries()
+
+
+@mcp.tool()
+def browse_library(library: str, category: str | None = None,
+                   limit: int = 300) -> dict:
+    """List datasets inside a library (optionally a category subfolder), each with
+    its GUI identity {dataset, category, library} and file path. e.g.
+    browse_library('Powertrain', 'Motor') or browse_library('Vehicles'). Feed a
+    returned 'file' to get_dataset to read/edit it. Returns {library, category, n,
+    datasets}."""
+    return cc.browse_library(library, category=category, limit=limit)
+
+
+@mcp.tool()
+def find_dataset(query: str, limit: int = 50) -> dict:
+    """Fuzzy-search the whole database by GUI identity text (library/dataset/
+    category names). Answers 'where do I set X', e.g. find_dataset('motor'),
+    find_dataset('sprung mass'), find_dataset('jounce'). Returns {query, n,
+    results:[{file, library, dataset, category}]}."""
+    return cc.find_dataset(query, limit=limit)
+
+
+# --------------------------------------------------------------------------- #
+# Structured dataset read/write + keyword dictionary
+# --------------------------------------------------------------------------- #
+
+@mcp.tool()
+def get_dataset(path: str, annotate: bool = True, max_tables: int = 40) -> dict:
+    """Read a dataset parsfile into structured form: GUI identity + scalar 'params'
+    (each {value, desc?, unit?}) + 'tables' (each {method, rows, desc?, unit?}).
+    With annotate=True, keywords are tagged with meaning + unit from the local
+    keyword dictionary (build it once via build_keyword_dictionary). This is the
+    high-level read for editing vehicle/suspension/powertrain/motor parameters.
+    Returns {path, identity, n_params, params, n_tables, tables}."""
+    return cc.get_dataset(path, annotate=annotate, max_tables=max_tables)
+
+
+@mcp.tool()
+def set_dataset(path: str, edits: dict, backup: bool = True) -> dict:
+    """Edit scalar keyword values in a dataset (edits = {KEYWORD: new_value}) and
+    refresh its #Modified stamp so the change shows in the GUI list. Writes a .bak
+    backup. e.g. set_dataset(massfile, {'M_SU': '1500', 'H_CG_SU': '530'}).
+    Returns {changed, added, backup, modified_stamp}."""
+    return cc.set_dataset(path, edits, backup=backup)
+
+
+@mcp.tool()
+def describe_keyword(keyword: str) -> dict:
+    """Look up a parsfile keyword's meaning + unit in the local keyword dictionary
+    (e.g. describe_keyword('M_SU') -> mass of sprung mass, kg). If unknown, returns
+    similar keyword names. Build the dictionary once with build_keyword_dictionary.
+    Returns {keyword, known, desc?, unit?, similar?}."""
+    return cc.describe_keyword(keyword)
+
+
+@mcp.tool()
+def build_keyword_dictionary(refresh: bool = True, max_files: int = 0) -> dict:
+    """Build the local keyword dictionary (keywords.json) by harvesting CarSim's
+    own echo files (DATA\\Results\\**\\*_echo.par), mapping each keyword to its
+    unit + description. Run once per install (and after upgrading CarSim).
+    refresh=False just reports the existing dictionary; max_files>0 does a quick
+    partial build. The dictionary is a LOCAL artifact (CarSim's proprietary text),
+    not redistributed. Returns {path, n_keywords, n_echo_files, refreshed}."""
+    return cc.build_keyword_dictionary(refresh=refresh, max_files=max_files)
+
+
 if __name__ == "__main__":
     mcp.run()

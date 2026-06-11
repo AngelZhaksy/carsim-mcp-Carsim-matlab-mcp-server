@@ -39,15 +39,33 @@ CarSim MCP 准备 → MATLAB MCP 执行 → CarSim MCP 读结果。
 
 ---
 
-## 2. 工具清单（CarSim MCP，共 10 个）
+## 2. 工具清单（CarSim MCP，共 17 个）
+
+**工具链 & 示例**
 
 | 工具 | 作用 | 关键返回 |
 |---|---|---|
 | `carsim_info()` | 解析并体检所有路径/版本，"是否接好了"的探针 | 各路径 `{path,exists}` + 顶层 `ok` |
-| `launch_gui(dataset?)` | 启动 CarSim GUI（非阻塞），可选打开数据集 | `pid` |
+| `launch_gui(dataset?)` | 启动 CarSim GUI（非阻塞）。**改参数不需要它** | `pid` |
 | `list_examples()` | 列出自带 CPAR 归档 + Simulink 示例模型 | `cpar_archives`, `simulink_models` |
-| `read_parsfile(path)` | 解析 parsfile → 关键字字典 | `keywords{KW:[值...]}`, `raw_lines` |
-| `write_parsfile(path, edits, mode="set")` | 改参数/IO/数据集链接，自动 `.bak` 备份 | `changed`, `added`, `backup` |
+
+**数据库导航 —— 纯代码定位并修改任意 GUI 参数（§5 详解）**
+
+| 工具 | 作用 | 关键返回 |
+|---|---|---|
+| `list_libraries()` | 列出 GUI 各库（DATA 子目录：Suspensions/Powertrain/Vehicles/Steering/Tires/IO_Channels…） | `libraries[{name,n_datasets,categories}]` |
+| `browse_library(library, category?, limit=300)` | 列某库/类下的数据集 + GUI 身份 + 文件路径 | `datasets[{file,dataset,category}]` |
+| `find_dataset(query, limit=50)` | 全库模糊搜索（"在哪改 X"）：`find_dataset("motor")` | `results[{file,library,dataset,category}]` |
+| `get_dataset(path, annotate=True)` | 结构化读：身份 + 标量 `params`（带**释义+单位**）+ `tables` | `identity`, `params`, `tables` |
+| `set_dataset(path, edits, backup=True)` | 改标量参数，刷新 `#Modified`，自动 `.bak`，**自动解除只读** | `changed`, `added`, `backup`, `modified_stamp` |
+| `describe_keyword(keyword)` | 查关键字释义+单位：`describe_keyword("M_SU")` → 簧载质量, kg | `known`, `desc`, `unit`, `similar` |
+| `build_keyword_dictionary(refresh=True)` | 从 CarSim 自带 echo 文件建本地关键字字典（每装机跑一次） | `n_keywords`, `n_echo_files` |
+| `read_parsfile(path)` / `write_parsfile(...)` | 底层关键字读/改（自动 `.bak`）；上层更友好的是 `get_dataset`/`set_dataset` | `keywords`, `changed`, `backup` |
+
+**求解 & 联合仿真**
+
+| 工具 | 作用 | 关键返回 |
+|---|---|---|
 | `run_solver(simfile, timeout=120)` | 纯 CarSim headless 求解（不碰 MATLAB） | `returncode`, `declared_outputs`, `output_dir` |
 | `generate_simfile(out_path, run_parsfile?, template_simfile)` | 从 GUI 生成的 simfile 模板派生新 simfile | `simfile`, `parsfile` |
 | `scaffold_cosim(out_dir, simfile, kind, model?, controller_call?, stop_time)` | 生成可直接跑的联合仿真包（`.slx` 或 `.m` 驱动 + `run_cosim.m`） | `runner_m`, `model`, `results_path` |
@@ -140,27 +158,72 @@ mcp__carsim__run_cosim_headless(runner_m = res.runner_m)   # 内部 matlab -batc
 
 ---
 
-## 5. 改参数：车辆参数 / 悬架 / 输入输出
+## 5. 改参数：纯代码定位并修改任意 GUI 参数（悬架高度 / 质量 / 电机·发动机 …）
 
-`write_parsfile` 按关键字改值（改第一处出现，缺失则追加），自动写 `.bak` 备份。
+**核心认知**：CarSim 的 GUI 是闭源的，但**数据不是**。GUI 里每一个数据集（悬架、簧载质量、
+动力总成、电机…）都是 `DATA\<库>\<类别>\*.par` 这样的**纯文本 parsfile**。所以 agent 不靠
+鼠标识别、不开 GUI，就能直接改这些参数。难点只是"在哪、关键字叫什么"——这就是导航层解决的。
+
+### 5.0 一次性：建关键字字典（每台装机跑一次）
+
+`get_dataset` / `describe_keyword` 的"释义+单位"来自 CarSim 自己求解器写的 echo 文件
+（`DATA\Results\**\*_echo.par`，行如 `M_SU 1370 ; kg ! Mass of unladen sprung mass (SU)`）。
 
 ```text
-# 读，看有哪些关键字
-mcp__carsim__read_parsfile(path = "E:\\Carsim2024\\DATA\\Results\\Run_<guid>\\Run_all.par")
-
-# 改车辆质量、设置联合仿真导入/导出端口数
-mcp__carsim__write_parsfile(
-    path  = "...\\Run_all.par",
-    edits = { "M_S": "1700", "PORTS_IMP": "4", "PORTS_EXP": "8" })
+mcp__carsim__build_keyword_dictionary()   # 扫全部 echo → keywords.json（本机 ~2000+ 关键字）
 ```
 
-- **车辆参数**：如 `M_S`（簧载质量）等数值类关键字，直接改值即可。
-- **输入/输出（联合仿真 IO）**：`PORTS_IMP` / `PORTS_EXP`（端口数）、`EXT_MODEL_STEP`（外部步长）。
-  在 simfile 或合并 parsfile 中调整，需与 Simulink 模型的 import/export 端口对应。
-- **悬架 / 转向等"选模型"**：CarSim 里这些是**数据集链接**（log 里 `Used Dataset: Suspension: ... { Strut } ...`）。
-  - 可做：把链接指向**已有**的另一数据集（改 parsfile 里对应的链接行/路径）。
-  - 不可做：从零**新建**一个悬架/整车数据集——这属于 GUI 数据库操作，用 `launch_gui` 在
-    CarSim GUI 里建好后，再用 MCP 引用。
+> `keywords.json` 是**本地产物**（含 CarSim 专有文档文字），已 `.gitignore`，**不随仓库分发**。
+> 若 `DATA\Results` 为空，先在 CarSim 跑任意一个示例生成 echo 文件即可。
+
+### 5.1 三步走：搜索 → 读（带释义）→ 改
+
+```text
+# ① 在哪改？全库模糊搜
+mcp__carsim__find_dataset(query = "sprung mass")
+#   -> Vehicles\Sprung_Mass 下各数据集 + 文件路径
+
+# ② 读出来看（带单位和释义）
+mcp__carsim__get_dataset(path = "...\\Vehicles\\Sprung_Mass\\SprMass_xxx.par")
+#   -> params: { M_SU:{value:1020, unit:"kg", desc:"Mass of unladen sprung mass (SU)"},
+#                H_CG_SU:{value:375, unit:"mm", desc:"Height of CG of sprung mass"}, ... }
+
+# ③ 改（自动 .bak、刷新 #Modified、自动解除只读）
+mcp__carsim__set_dataset(path = "...\\SprMass_xxx.par",
+                         edits = { "M_SU": "1500", "H_CG_SU": "530" })
+```
+
+### 5.2 各类参数都在哪个库
+
+| 你要改的 | 库 / 类别（`browse_library` 参数） | 真实关键字示例 |
+|---|---|---|
+| **簧载质量 / 质心 / 惯量** | `Vehicles` → `Sprung_Mass` | `M_SU`(kg)、`H_CG_SU`(mm)、`IZZ_SU`(kg-m²)、`LX_CG_SU`(mm) |
+| **悬架**（跳动止点/刚度/运动学/柔度） | `Suspensions` → `Jounce_Rebound`/`Compliance`/`Kin_*`… | `F_JNC_STOP_TABLE`、`F_REB_STOP_TABLE`（表格）等 |
+| **电机**（混动/电驱） | `Powertrain` → `Motor` / `HEV` | `INSTALL_MOTOR`、效率表；`OPT_HEV` 选推进类型 |
+| **发动机** | `Powertrain` → `Engine` | `INSTALL_ENGINE`、扭矩 MAP 表 |
+| **传动/差速/挡位** | `Powertrain` → `Trans*`/`*diff`/`Shift` | `R_MDRIVE`、传动比等 |
+| **转向** | `Steering` | 见 `Steering_Systems.pdf` |
+| **轮胎** | `Tires` | 见 `Tire_Models.pdf` |
+| **联合仿真 IO 导入/导出通道** | `IO_Channels` | import/export 通道配置（见下） |
+
+> 不确定关键字含义？`describe_keyword("IZZ_SU")` 直接给释义+单位；
+> 不确定库里有哪些类别？`list_libraries()` 看 `categories`，再 `browse_library(库, 类别)`。
+
+### 5.3 联合仿真的输入/输出（IO 通道）
+
+联合仿真的 import/export 既可在 `IO_Channels` 库的数据集里配（`browse_library("IO_Channels")`
+→ `get_dataset`/`set_dataset`），也可在 simfile / 合并 parsfile 里直接调端口数：
+
+```text
+mcp__carsim__write_parsfile(path = "...\\Run_all.par",
+    edits = { "PORTS_IMP": "4", "PORTS_EXP": "8" })   # 需与 Simulink 模型 import/export 端口对应
+```
+
+### 5.4 关于"打开 GUI 的某个输入/输出窗口"
+
+CarSim 的 GUI（`CarSim_64.exe`）**没有公开命令行参数能直接打开某个具体界面**，只会打开到上次的
+Run Control。本 MCP 走**纯代码改 parsfile** 路线（上面 §5.1–5.3），不需要、也不依赖 GUI。
+`launch_gui` 仅作为你人工查看/核对的入口；新建一个全新数据集仍建议在 GUI 里建好后用 MCP 引用、修改。
 
 ---
 
@@ -189,6 +252,10 @@ mcp__carsim__read_results(path = "<上面的 .vs 同名结果或导出的 .mat>"
 - **SBW 课题**：可参考 `DATA\Extensions\Simulink\ext_steer_*.mdl`、`Yaw_*` 等转向示例做起点。
 - **改了 MCP 代码必须重启 Claude Code**：MCP 服务在会话启动时加载,改 `server.py`/`carsim_core.py`
   后旧进程不会热更新,需重启或重载 MCP 才生效。
+- **CarSim 自带库数据集是只读的**：`set_dataset`/`write_parsfile` 会**自动解除只读**后再写（GUI 保存时也这么做），
+  并先写 `.bak`。原文件内容可从 `.bak` 回滚。
+- **关键字字典需先建**：`get_dataset` 的释义/单位、`describe_keyword` 都依赖 `keywords.json`。
+  没建时这些字段为空但不报错；跑一次 `build_keyword_dictionary()` 即可（需 `DATA\Results` 里有 echo 文件）。
 - **若某个工具调用一直转圈不返回**（曾在 `read_results` 上出现）：很可能是新加的工具在**函数内部**
   懒加载了 `numpy/scipy` 等原生库——FastMCP 在工作线程跑同步工具,首次在非主线程 import 原生库会在
   Windows 上**死锁**。修法:把这类库放到**模块顶层** import。详见 `carsim-mcp/README.md` 的"故障排查"。
