@@ -16,6 +16,8 @@ import re
 import glob
 import json
 import stat
+import time
+import uuid
 import shutil
 import subprocess
 from pathlib import Path
@@ -196,39 +198,45 @@ def read_parsfile(path: str) -> dict:
     return {"path": str(p), "keywords": keywords, "raw_lines": raw_lines}
 
 
-def write_parsfile(path: str, edits: dict, mode: str = "set", backup: bool = True) -> dict:
+def write_parsfile(path: str, edits: dict, mode: str = "set", backup: bool = True,
+                   occurrence: int = 1) -> dict:
     """Edit keyword values in a parsfile.
 
-    edits: {KEYWORD: new_value}. For mode='set', replace the value of the FIRST
-    occurrence of each keyword (preserving the keyword token and indentation);
-    append `KEYWORD value` if the keyword is absent. Writes a .bak backup.
+    edits: {KEYWORD: new_value}. Replace the value of the chosen occurrence of each
+    keyword (preserving the keyword token and indentation); append `KEYWORD value`
+    if the keyword is absent. Writes a .bak backup.
+
+    occurrence: which occurrence of each keyword to replace, 1-based (default 1 =
+    first). occurrence=0 replaces ALL occurrences. Use this for keywords that repeat
+    legitimately (e.g. IDIFF, per-axle PARSFILE links, per-corner friction).
+
     Returns {changed, added, backup}.
     """
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"parsfile not found: {path}")
     lines = p.read_text(encoding="latin-1").splitlines()
-    remaining = {str(k): str(v) for k, v in edits.items()}
+    edits_s = {str(k): str(v) for k, v in edits.items()}
+    counts = {k: 0 for k in edits_s}
     changed, added = [], []
 
     for idx, line in enumerate(lines):
         s = line.strip()
         if not s or s.startswith(_COMMENT_PREFIXES):
             continue
-        parts = s.split(None, 1)
-        kw = parts[0]
-        if kw in remaining:
-            new_val = remaining.pop(kw)
-            # Preserve leading whitespace of the original line.
-            lead = line[: len(line) - len(line.lstrip())]
-            lines[idx] = f"{lead}{kw} {new_val}"
-            changed.append(kw)
-        if not remaining:
-            break
+        kw = s.split(None, 1)[0]
+        if kw in edits_s:
+            counts[kw] += 1
+            if occurrence == 0 or counts[kw] == occurrence:
+                lead = line[: len(line) - len(line.lstrip())]  # preserve indent
+                lines[idx] = f"{lead}{kw} {edits_s[kw]}"
+                if kw not in changed:
+                    changed.append(kw)
 
-    for kw, val in remaining.items():  # keywords not present -> append
-        lines.append(f"{kw} {val}")
-        added.append(kw)
+    for kw, val in edits_s.items():  # keywords not present -> append
+        if counts[kw] == 0:
+            lines.append(f"{kw} {val}")
+            added.append(kw)
 
     backup_path = None
     if backup:
@@ -449,74 +457,109 @@ def _summarize_array(name: str, arr) -> dict | None:
             "max": float(np.nanmax(a)), "final": float(a[-1])}
 
 
-def read_results(path: str, max_channels: int = 50) -> dict:
-    """Parse a results file (.mat preferred) into per-channel summaries."""
+def _name_matches(name: str, pattern: str | None) -> bool:
+    """Case-insensitive substring match, or regex if `pattern` is valid regex."""
+    if not pattern:
+        return True
+    lo = name.lower()
+    if pattern.lower() in lo:
+        return True
+    try:
+        return re.search(pattern, name, re.IGNORECASE) is not None
+    except re.error:
+        return False
+
+
+def read_results(path: str, max_channels: int = 50, pattern: str | None = None,
+                 names_only: bool = False) -> dict:
+    """Parse a results file (.mat or CarSim ERD .vs/.vsb) into per-channel summaries.
+
+    pattern: keep only channels whose name matches (case-insensitive substring, or
+      regex) -- e.g. pattern='Vx' or pattern='AVy|Ay|Yaw'. Essential for big runs:
+      a full CarSim run can have 1000+ channels that overflow the result if unfiltered.
+    names_only: return just the channel names + units (fast discovery, no binary read).
+    Returns {source, n, n_returned, truncated, channels|names, ...}.
+    """
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"results not found: {path}")
 
     if p.suffix.lower() == ".mat":
         mat = _loadmat(path, squeeze_me=True, struct_as_record=False)
-        channels = {}
+        pairs = []
         for key, val in mat.items():
             if key.startswith("__"):
                 continue
-            # Simulink.SimulationOutput / structs: walk one level of attributes.
-            if hasattr(val, "_fieldnames"):
+            if hasattr(val, "_fieldnames"):  # Simulink.SimulationOutput / structs
                 for fn in val._fieldnames:
-                    sub = getattr(val, fn)
-                    s = _summarize_array(f"{key}.{fn}", sub)
-                    if s:
-                        channels[f"{key}.{fn}"] = s
+                    pairs.append((f"{key}.{fn}", getattr(val, fn)))
             else:
-                s = _summarize_array(key, val)
-                if s:
-                    channels[key] = s
+                pairs.append((key, val))
+        sel = [(k, v) for k, v in pairs if _name_matches(k, pattern)]
+        if names_only:
+            return {"source": "mat", "n": len(pairs), "n_returned": len(sel),
+                    "names": [k for k, _ in sel]}
+        channels = {}
+        for k, v in sel:
             if len(channels) >= max_channels:
                 break
-        return {"source": "mat", "n": len(channels), "channels": channels}
+            s = _summarize_array(k, v)
+            if s:
+                channels[k] = s
+        return {"source": "mat", "n": len(pairs), "n_returned": len(channels),
+                "truncated": len(sel) > len(channels), "channels": channels}
 
     if p.suffix.lower() in (".erd", ".vs"):
         # CarSim 2024 ERD (Version 2): JSON header (.vs) + float32 data (.vsb).
         grp = json.loads(p.read_text(encoding="latin-1"))["VsChannelGroup"]
         chans = grp.get("Channels", [])
         names = [c.get("Name Aliases", ["?"])[0] for c in chans]
+        units = [c.get("Units", "") for c in chans]
         xstep = float(grp.get("XStep", 0) or 0)
         xstart = float(grp.get("XStart", 0) or 0)
         xlabel = grp.get("XLabel", "Time")
+        nchan = len(names)
+
+        # indices of channels matching the filter
+        sel_idx = [i for i in range(nchan) if _name_matches(names[i], pattern)]
+
+        if names_only:
+            return {"source": "erd", "n": nchan, "n_returned": len(sel_idx),
+                    "x_label": xlabel, "x_step": xstep,
+                    "names": [{"name": names[i], "unit": units[i]} for i in sel_idx]}
 
         data_file = p.with_suffix(".vsb")
         if not data_file.exists():
-            return {"source": "erd", "n": len(names),
-                    "channels": {n: {} for n in names[:max_channels]},
+            return {"source": "erd", "n": nchan,
+                    "channels": {names[i]: {} for i in sel_idx[:max_channels]},
                     "note": "header parsed but .vsb binary not found; names only.",
                     "data_file": None}
 
         raw = np.fromfile(str(data_file), dtype="<f4")
-        nchan = len(names)
         nsamp = raw.size // nchan if nchan else 0
-        # CarSim's .vsb starts with a small fixed header, so the total float
-        # count is NOT an exact multiple of nchan (v2024: 6 leading floats /
-        # 24 bytes). Skip it; otherwise every column is shifted and the channel
-        # names get mislabeled onto the wrong data (e.g. Vx reading 359 km/h).
-        # The header length is the remainder; data after it is row-major
-        # (sample-major) frames. Verified against a Double Lane Change run:
-        # Vx -> 72 km/h, Station -> 0..199 m, Bk_Stat -> 0.
+        # CarSim's .vsb starts with a small fixed header, so the total float count
+        # is NOT an exact multiple of nchan (v2024: 6 leading floats / 24 bytes).
+        # Skip it; otherwise every column is shifted and channel names get mislabeled
+        # onto the wrong data (e.g. Vx reading 359 km/h). The header length is the
+        # remainder; data after it is row-major (sample-major) frames. Verified on a
+        # Double Lane Change run: Vx -> 72 km/h, Station -> 0..199 m, Bk_Stat -> 0.
         header = raw.size - nsamp * nchan
         mat = raw[header: header + nsamp * nchan].reshape(nsamp, nchan)
 
         channels = {}
-        tvec = xstart + xstep * np.arange(nsamp)
-        s = _summarize_array(xlabel, tvec)
-        if s:
-            channels[xlabel] = s
-        for i, nm in enumerate(names):
+        if not pattern:  # include the implicit X (time) axis when not filtering
+            s = _summarize_array(xlabel, xstart + xstep * np.arange(nsamp))
+            if s:
+                channels[xlabel] = s
+        for i in sel_idx:
             if len(channels) >= max_channels:
                 break
-            s = _summarize_array(nm, mat[:, i])
+            s = _summarize_array(names[i], mat[:, i])
             if s:
-                channels[nm] = s
+                s["unit"] = units[i]
+                channels[names[i]] = s
         return {"source": "erd", "n": nchan, "n_samples": int(nsamp),
+                "n_returned": len(channels), "truncated": len(sel_idx) > max_channels,
                 "x_label": xlabel, "x_step": xstep,
                 "channels": channels, "data_file": str(data_file)}
 
@@ -997,3 +1040,374 @@ def describe_keyword(keyword: str) -> dict:
     sub = [k for k in d if base in k][:15]
     return {"keyword": base, "known": False, "similar": sub,
             "n_in_dict": len(d)}
+
+
+# --------------------------------------------------------------------------- #
+# Table editing (CarSim TABLE blocks: KEYWORD [method] / rows / ENDTABLE)
+# --------------------------------------------------------------------------- #
+# Most chassis/powertrain/battery PHYSICS lives in tables (motor torque maps, tire
+# Pacejka carpets, battery OCV-vs-SOC, spring/damper curves). set_dataset only edits
+# scalar 'KEYWORD value' lines, so these tools fill the gap.
+
+def _now_stamp() -> str:
+    """CarSim #Modified timestamp format: MM-DD-YYYY HH:MM:SS."""
+    return time.strftime("%m-%d-%Y %H:%M:%S")
+
+
+def _bump_modified(lines: list[str]) -> bool:
+    """Rewrite the #Modified metadata line in-place (returns True if bumped)."""
+    stamp = _now_stamp()
+    for idx, line in enumerate(lines):
+        if line.startswith("#Modified") and ":" in line:
+            lines[idx] = f"{line.split(':', 1)[0]}: {stamp}"
+            return True
+    return False
+
+
+def _find_table_blocks(lines: list[str], keyword: str) -> list[tuple]:
+    """Return [(header_idx, endtable_idx, method), ...] for each TABLE block whose
+    header keyword == keyword (header 'KEYWORD [method]', data rows, then ENDTABLE)."""
+    blocks = []
+    n = len(lines)
+    i = 0
+    while i < n:
+        s = lines[i].strip()
+        if not s or s.startswith(("!", "#")):
+            i += 1
+            continue
+        parts = s.split(None, 1)
+        if parts[0] == keyword:
+            method = parts[1].strip() if len(parts) > 1 else ""
+            j, end = i + 1, None
+            while j < n:
+                t = lines[j].strip()
+                if t.startswith("ENDTABLE"):
+                    end = j
+                    break
+                if not t or t.startswith("!"):
+                    j += 1
+                    continue
+                if _is_data_row(t):
+                    j += 1
+                    continue
+                break  # a non-data keyword line -> not a table header
+            if end is not None:
+                blocks.append((i, end, method))
+                i = end + 1
+                continue
+        i += 1
+    return blocks
+
+
+def _fmt_num(x) -> str:
+    if isinstance(x, float) and x.is_integer():
+        return str(int(x))
+    return str(x)
+
+
+def _fmt_table_row(r) -> str:
+    """Format one table row: a string passes through; a list/tuple -> 'a, b, c'."""
+    if isinstance(r, str):
+        return r
+    if isinstance(r, (list, tuple)):
+        return ", ".join(_fmt_num(x) for x in r)
+    return str(r)
+
+
+def set_table(path: str, keyword: str, rows, method: str | None = None,
+              occurrence: int = 1, backup: bool = True) -> dict:
+    """Replace the data rows of a CarSim TABLE block (KEYWORD [method] ... ENDTABLE).
+
+    rows: list of rows; each row is a string ("0, 1") or a list/tuple ([0, 1]).
+    method: optional new interpolation token (LINEAR/STEP/SPLINE/...); kept if None.
+    occurrence: which matching table block (1-based) when the keyword's table repeats.
+    Re-reads after writing to VERIFY the new row count landed. Returns {keyword,
+    n_rows, method, backup, verified}.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"parsfile not found: {path}")
+    lines = p.read_text(encoding="latin-1", errors="replace").splitlines()
+    blocks = _find_table_blocks(lines, keyword)
+    if not blocks:
+        raise ValueError(f"no TABLE block found for keyword '{keyword}' in {path}")
+    occ = occurrence if occurrence and occurrence > 0 else 1
+    if occ > len(blocks):
+        raise ValueError(f"keyword '{keyword}' has {len(blocks)} table block(s); "
+                         f"occurrence {occ} out of range")
+    hi, ei, cur_method = blocks[occ - 1]
+    lead = lines[hi][: len(lines[hi]) - len(lines[hi].lstrip())]
+    m = cur_method if method is None else method
+    header = f"{lead}{keyword}" + (f" {m}" if m else "")
+    body = [f"{lead}{_fmt_table_row(r)}" for r in rows]
+    new_lines = lines[:hi] + [header] + body + [f"{lead}ENDTABLE"] + lines[ei + 1:]
+    _bump_modified(new_lines)
+
+    backup_path = None
+    if backup:
+        backup_path = str(p) + ".bak"
+        shutil.copy2(p, backup_path)
+        _ensure_writable(Path(backup_path))
+    _ensure_writable(p)
+    p.write_text("\n".join(new_lines) + "\n", encoding="latin-1")
+
+    # verify-after-write: re-parse and confirm the row count
+    vlines = p.read_text(encoding="latin-1", errors="replace").splitlines()
+    vb = _find_table_blocks(vlines, keyword)
+    verified = False
+    if vb and (occ - 1) < len(vb):
+        vhi, vei, _ = vb[occ - 1]
+        got = sum(1 for k in range(vhi + 1, vei)
+                  if vlines[k].strip() and not vlines[k].strip().startswith("!"))
+        verified = (got == len(body))
+    return {"keyword": keyword, "n_rows": len(body), "method": m,
+            "backup": backup_path, "verified": verified}
+
+
+# --------------------------------------------------------------------------- #
+# Link / assembly layer (PARSFILE links + #BlueLink slot labels)
+# --------------------------------------------------------------------------- #
+# A Vehicle Assembly (and a powertrain) is a list of 'PARSFILE <relpath>' links,
+# each tagged by a '#BlueLink' comment naming the slot (Steering/Tire/Powertrain/...).
+# set_dataset can't target one of N repeated PARSFILE lines, so these tools own
+# 'assemble a vehicle': see the links, swap one, or walk the whole tree.
+
+def _bluelink_after(lines: list[str], i: int) -> tuple:
+    """(slot_label, bluelink_line_index) for the #BlueLink following a PARSFILE link
+    at line i, else (None, None). #BlueLinkN Lib`DataSet` Cat` , <slot>`FileID."""
+    for j in range(i + 1, min(i + 4, len(lines))):
+        t = lines[j].strip()
+        if t.startswith("#BlueLink"):
+            body = t.split(None, 1)[1] if len(t.split(None, 1)) > 1 else ""
+            parts = body.split("`")
+            slot = parts[-2].lstrip(" ,").strip() if len(parts) >= 2 else None
+            return slot, j
+        if t and not t.startswith("#"):
+            break
+    return None, None
+
+
+def get_links(path: str) -> dict:
+    """List a dataset's subsystem links (PARSFILE lines) with slot labels + resolved
+    identity -- the 'what does this assembly contain' view. Returns {path, datadir,
+    n, links:[{index, line, slot, parsfile, abspath, exists, library, dataset,
+    category}]}."""
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"parsfile not found: {path}")
+    db = Path(_db_dir())
+    lines = p.read_text(encoding="latin-1", errors="replace").splitlines()
+    links = []
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith("PARSFILE ") and len(s.split(None, 1)) == 2:
+            relpath = s.split(None, 1)[1].strip()
+            slot, _ = _bluelink_after(lines, i)
+            ab = db / relpath
+            ident = parse_identity(ab) if ab.exists() else {}
+            links.append({"index": len(links), "line": i, "slot": slot,
+                          "parsfile": relpath, "abspath": str(ab),
+                          "exists": ab.exists(), "library": ident.get("library"),
+                          "dataset": ident.get("dataset"),
+                          "category": ident.get("category")})
+    return {"path": str(p), "datadir": str(db), "n": len(links), "links": links}
+
+
+def set_link(path: str, new_parsfile: str, index: int | None = None,
+             slot: str | None = None, backup: bool = True) -> dict:
+    """Swap one subsystem link to a different dataset (e.g. drop an EV powertrain into
+    a vehicle, or point a powertrain at a different battery/motor dataset).
+
+    Identify the link by `index` (from get_links) or by `slot` substring (e.g.
+    'Powertrain', 'Tire', 'Steering'). new_parsfile is a DATADIR-relative path (e.g.
+    'Powertrain\\4wd\\4WD_<id>.par') or an absolute path under the DB. Rewrites the
+    PARSFILE line and refreshes the matching #BlueLink to the new target's identity.
+    Returns {changed_index, slot, old, new, backup}.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"parsfile not found: {path}")
+    db = Path(_db_dir())
+    links = get_links(path)["links"]
+    if not links:
+        raise ValueError(f"no PARSFILE links in {path}")
+    if index is not None:
+        target = next((L for L in links if L["index"] == index), None)
+        if target is None:
+            raise ValueError(f"link index {index} not found (have 0..{len(links)-1})")
+    elif slot is not None:
+        matches = [L for L in links if slot.lower() in (L["slot"] or "").lower()]
+        if not matches:
+            raise ValueError(f"no link with slot matching '{slot}'. "
+                             f"Slots: {[L['slot'] for L in links]}")
+        if len(matches) > 1:
+            raise ValueError(f"slot '{slot}' matches indices "
+                             f"{[m['index'] for m in matches]}; pass index=")
+        target = matches[0]
+    else:
+        raise ValueError("set_link needs either index= or slot=")
+
+    nab = Path(new_parsfile)
+    if nab.is_absolute():
+        new_abs = nab
+        try:
+            npar = str(nab.relative_to(db))
+        except ValueError:
+            npar = new_parsfile
+    else:
+        new_abs = db / new_parsfile
+        npar = new_parsfile
+    if not new_abs.exists():
+        raise FileNotFoundError(f"new link target not found: {new_abs}")
+
+    lines = p.read_text(encoding="latin-1", errors="replace").splitlines()
+    li = target["line"]
+    lead = lines[li][: len(lines[li]) - len(lines[li].lstrip())]
+    old_rel = target["parsfile"]
+    lines[li] = f"{lead}PARSFILE {npar}"
+
+    slot_lbl, bidx = _bluelink_after(lines, li)
+    if bidx is not None:
+        nid = parse_identity(new_abs)
+        tag = lines[bidx].strip().split(None, 1)[0]  # '#BlueLinkN'
+        slot_use = slot_lbl or target["slot"] or ""
+        bl = (f"{tag} {nid.get('library') or ''}`{nid.get('dataset') or ''}` "
+              f"{nid.get('category') or ''}` , {slot_use}`{new_abs.stem}")
+        blead = lines[bidx][: len(lines[bidx]) - len(lines[bidx].lstrip())]
+        lines[bidx] = f"{blead}{bl}"
+
+    _bump_modified(lines)
+    backup_path = None
+    if backup:
+        backup_path = str(p) + ".bak"
+        shutil.copy2(p, backup_path)
+        _ensure_writable(Path(backup_path))
+    _ensure_writable(p)
+    p.write_text("\n".join(lines) + "\n", encoding="latin-1")
+    return {"changed_index": target["index"], "slot": target["slot"],
+            "old": old_rel, "new": npar, "backup": backup_path}
+
+
+def resolve_assembly(path: str, max_depth: int = 3) -> dict:
+    """Recursively expand a dataset's link tree (the full vehicle composition):
+    Vehicle Assembly -> Powertrain -> HEV(battery/motors) -> ... Returns a nested
+    {slot, path, library, dataset, children:[...]} tree, bounded by max_depth."""
+    db = Path(_db_dir())  # noqa: F841 (ensures DB exists; get_links uses it)
+
+    def walk(fp, slot, depth):
+        fp = Path(fp)
+        ident = parse_identity(fp) if fp.exists() else {}
+        node = {"slot": slot, "path": str(fp), "library": ident.get("library"),
+                "dataset": ident.get("dataset"), "children": []}
+        if depth <= 0 or not fp.exists():
+            return node
+        try:
+            for L in get_links(str(fp))["links"]:
+                if L["exists"]:
+                    node["children"].append(walk(L["abspath"], L["slot"], depth - 1))
+                else:
+                    node["children"].append({"slot": L["slot"], "path": L["abspath"],
+                                             "exists": False, "children": []})
+        except Exception:
+            pass
+        return node
+
+    return walk(Path(path), None, max_depth)
+
+
+# --------------------------------------------------------------------------- #
+# Dataset creation
+# --------------------------------------------------------------------------- #
+
+def clone_dataset(src_path: str, out_path: str | None = None,
+                  new_dataset: str | None = None,
+                  new_category: str | None = None) -> dict:
+    """Copy a dataset to a NEW .par with a fresh #FileID + identity, so an agent can
+    create datasets instead of only editing shipped ones. new_dataset/new_category
+    override #DataSet/#Category (and #FullDataName). out_path defaults to the source
+    folder with a fresh '<prefix>_<uuid>.par' name. Returns {path, file_id, identity}.
+    """
+    src = Path(src_path)
+    if not src.exists():
+        raise FileNotFoundError(f"source dataset not found: {src_path}")
+    prefix = src.stem.split("_")[0] if "_" in src.stem else src.stem
+    new_id = f"{prefix}_{uuid.uuid4()}"
+    out = Path(out_path) if out_path else src.parent / f"{new_id}.par"
+
+    lines = src.read_text(encoding="latin-1", errors="replace").splitlines()
+    stamp = _now_stamp()
+    for idx, line in enumerate(lines):
+        if line.startswith("#FullDataName"):
+            parts = line[len("#FullDataName"):].strip().split("`")
+            lib = parts[0] if len(parts) > 0 else ""
+            ds = new_dataset if new_dataset is not None else (parts[1] if len(parts) > 1 else "")
+            cat = new_category if new_category is not None else (parts[2] if len(parts) > 2 else "")
+            lines[idx] = f"#FullDataName {lib}`{ds}`{cat}"
+        elif line.startswith("#FileID") and ":" in line:
+            lines[idx] = f"{line.split(':', 1)[0]}: {new_id}"
+        elif line.startswith("#DataSet") and ":" in line and new_dataset is not None:
+            lines[idx] = f"{line.split(':', 1)[0]}: {new_dataset}"
+        elif line.startswith("#Category") and ":" in line and new_category is not None:
+            lines[idx] = f"{line.split(':', 1)[0]}: {new_category}"
+        elif line.startswith(("#Created", "#Modified")) and ":" in line:
+            lines[idx] = f"{line.split(':', 1)[0]}: {stamp}"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_writable(out) if out.exists() else None
+    out.write_text("\n".join(lines) + "\n", encoding="latin-1")
+    return {"path": str(out), "file_id": new_id, "identity": parse_identity(out)}
+
+
+# --------------------------------------------------------------------------- #
+# Run consolidation (EXPERIMENTAL): flatten an Assembly + Procedure to a runnable
+# self-contained parsfile, so a NEW config can be solved headless without the GUI.
+# --------------------------------------------------------------------------- #
+
+# GUI-only metadata lines to drop when inlining (the solver ignores them anyway, and
+# duplicating them across many inlined files is noise). Keep #RingCtrl/#CheckBox etc?
+# No -- those are GUI control state; the solver reads the actual keywords, not these.
+_DROP_PREFIXES = ("#",)
+
+
+def consolidate_run(assembly_path: str, procedure_path: str | None = None,
+                    out_path: str | None = None, max_depth: int = 8) -> dict:
+    """EXPERIMENTAL. Flatten a Vehicle Assembly (+ optional Procedure) into one
+    self-contained parsfile by recursively inlining every PARSFILE link in order, so
+    a NEW config can be run headless. CarSim is parse-order sensitive; if run_solver
+    rejects the result, fall back to editing a baked DATA\\Results\\<run>\\Run_all.par.
+    Returns {path, n_lines, n_inlined, note}."""
+    db = Path(_db_dir())
+    counts = {"inlined": 0}
+
+    def inline(fp, depth, out):
+        fp = Path(fp)
+        if depth < 0 or not fp.exists():
+            return
+        counts["inlined"] += 1
+        for line in fp.read_text(encoding="latin-1", errors="replace").splitlines():
+            s = line.strip()
+            if s in ("PARSFILE", "END"):
+                continue
+            if s.startswith(_DROP_PREFIXES):  # drop GUI metadata/comments
+                continue
+            if s.startswith("PARSFILE ") and len(s.split(None, 1)) == 2:
+                inline(db / s.split(None, 1)[1].strip(), depth - 1, out)
+                continue
+            out.append(line)
+
+    out_lines = ["PARSFILE"]
+    inline(Path(assembly_path), max_depth, out_lines)
+    if procedure_path:
+        inline(Path(procedure_path), max_depth, out_lines)
+    out_lines.append("END")
+    out = Path(out_path) if out_path else Path(assembly_path).parent / "consolidated_run.par"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(out_lines) + "\n", encoding="latin-1")
+    return {"path": str(out), "n_lines": len(out_lines),
+            "n_inlined": counts["inlined"], "runnable": "unverified",
+            "note": "EXPERIMENTAL inspection/flatten tool. A naive link-order inline "
+                    "does NOT satisfy CarSim's parse-ORDER for complex vehicles "
+                    "(tested: 'SET_UNITS_TABLE_ROW ... RACK_TRAVEL_TABLE doesn't exist' "
+                    "when a table is referenced before its cross-link definition). For "
+                    "a runnable headless config, edit a baked DATA\\Results\\<run>\\"
+                    "Run_all.par (set_dataset/set_table/write_parsfile), or use the GUI "
+                    "'Generate Files for this Run' after set_link to let CarSim order it."}

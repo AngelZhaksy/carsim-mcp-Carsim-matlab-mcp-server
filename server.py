@@ -49,12 +49,15 @@ def read_parsfile(path: str) -> dict:
 
 
 @mcp.tool()
-def write_parsfile(path: str, edits: dict, mode: str = "set") -> dict:
-    """Edit keyword values in a parsfile. 'edits' = {KEYWORD: new_value}. For
-    mode='set', replaces the first occurrence of each keyword (appends if absent),
-    writing a .bak backup. Returns {changed, added, backup}. Use this to change
-    vehicle parameters, I/O import/export channel config, and dataset links."""
-    return cc.write_parsfile(path, edits, mode=mode)
+def write_parsfile(path: str, edits: dict, mode: str = "set",
+                   occurrence: int = 1) -> dict:
+    """Edit scalar keyword values in a parsfile. 'edits' = {KEYWORD: new_value}.
+    Replaces the chosen occurrence of each keyword (appends if absent), writing a
+    .bak backup. occurrence: 1-based (default 1 = first); occurrence=0 replaces ALL
+    occurrences -- use this for keywords that legitimately repeat (IDIFF, per-axle
+    PARSFILE links). For TABLE blocks use set_table; for links use set_link. Returns
+    {changed, added, backup}."""
+    return cc.write_parsfile(path, edits, mode=mode, occurrence=occurrence)
 
 
 @mcp.tool()
@@ -91,11 +94,16 @@ def scaffold_cosim(out_dir: str, simfile: str, kind: str = "slx",
 
 
 @mcp.tool()
-def read_results(path: str, max_channels: int = 50) -> dict:
-    """Parse a results file (.mat saved by the co-sim driver, or a CarSim .erd)
-    into per-channel summaries {len, min, max, final}. Returns {source, n,
-    channels}."""
-    return cc.read_results(path, max_channels=max_channels)
+def read_results(path: str, max_channels: int = 50, pattern: str | None = None,
+                 names_only: bool = False) -> dict:
+    """Parse a results file (.mat, or a CarSim ERD .vs/.vsb) into per-channel
+    summaries {len, min, max, final, unit}. A full CarSim run can have 1000+
+    channels, so use pattern= to keep only matching names (case-insensitive
+    substring or regex, e.g. pattern='Vx' or 'Ay|AVz|Yaw'); use names_only=True to
+    list channel names+units without reading the binary (fast discovery). Returns
+    {source, n, n_returned, truncated, channels|names}."""
+    return cc.read_results(path, max_channels=max_channels, pattern=pattern,
+                           names_only=names_only)
 
 
 @mcp.tool()
@@ -182,6 +190,83 @@ def build_keyword_dictionary(refresh: bool = True, max_files: int = 0) -> dict:
     partial build. The dictionary is a LOCAL artifact (CarSim's proprietary text),
     not redistributed. Returns {path, n_keywords, n_echo_files, refreshed}."""
     return cc.build_keyword_dictionary(refresh=refresh, max_files=max_files)
+
+
+# --------------------------------------------------------------------------- #
+# Table editing + link/assembly layer + dataset creation
+# --------------------------------------------------------------------------- #
+
+@mcp.tool()
+def set_table(path: str, keyword: str, rows: list, method: str | None = None,
+              occurrence: int = 1) -> dict:
+    """Replace the rows of a CarSim TABLE block (KEYWORD [method] ... ENDTABLE). Most
+    chassis/powertrain/battery PHYSICS is tables: motor torque maps, tire Pacejka
+    carpets, battery OCV-vs-SOC, spring/damper curves. 'rows' is a list of rows, each
+    a string ("0, 1") or a list ([0, 1]). method overrides the interpolation token
+    (LINEAR/STEP/SPLINE...) if given. occurrence picks the Nth table block (1-based)
+    if the keyword repeats. Re-reads to verify. Returns {keyword, n_rows, method,
+    backup, verified}. (set_dataset only edits scalars; this owns tables.)"""
+    return cc.set_table(path, keyword, rows, method=method, occurrence=occurrence)
+
+
+@mcp.tool()
+def get_links(path: str) -> dict:
+    """List a dataset's subsystem links (the PARSFILE lines) with their slot labels
+    and resolved identity -- the 'what does this assembly contain' view. A Vehicle
+    Assembly links steering/suspension/tires/sprung-mass/powertrain/brakes; an EV
+    powertrain links HEV(battery+motors)/PMC/diffs. Returns {path, datadir, n,
+    links:[{index, slot, parsfile, exists, library, dataset, category}]}."""
+    return cc.get_links(path)
+
+
+@mcp.tool()
+def set_link(path: str, new_parsfile: str, index: int | None = None,
+             slot: str | None = None) -> dict:
+    """Swap ONE subsystem link to a different dataset -- the core 'assemble a vehicle'
+    op (e.g. drop an EV powertrain into a vehicle, point a powertrain at a different
+    battery/motor dataset). Identify the link by index (from get_links) or by slot
+    substring ('Powertrain','Tire','Steering'). new_parsfile is a DATADIR-relative
+    path (e.g. 'Powertrain\\4wd\\4WD_<id>.par'). Rewrites the PARSFILE line + refreshes
+    the matching #BlueLink. (set_dataset can't target one of N repeated PARSFILE
+    lines; this can.) Returns {changed_index, slot, old, new, backup}."""
+    return cc.set_link(path, new_parsfile, index=index, slot=slot)
+
+
+@mcp.tool()
+def resolve_assembly(path: str, max_depth: int = 3) -> dict:
+    """Recursively expand a dataset's link tree -- the full vehicle composition:
+    Vehicle Assembly -> Powertrain -> HEV(battery/motors) -> tables. Returns a nested
+    {slot, path, library, dataset, children:[...]} tree (bounded by max_depth). Use to
+    understand or audit what a vehicle is built from before editing."""
+    return cc.resolve_assembly(path, max_depth=max_depth)
+
+
+@mcp.tool()
+def clone_dataset(src_path: str, out_path: str | None = None,
+                  new_dataset: str | None = None,
+                  new_category: str | None = None) -> dict:
+    """Copy a dataset to a NEW .par with a fresh #FileID + identity, so you can create
+    datasets instead of only editing shipped (read-only) ones. new_dataset/
+    new_category override the #DataSet/#Category and #FullDataName. out_path defaults
+    to the source folder with a fresh '<prefix>_<uuid>.par' name. Returns {path,
+    file_id, identity}."""
+    return cc.clone_dataset(src_path, out_path=out_path, new_dataset=new_dataset,
+                            new_category=new_category)
+
+
+@mcp.tool()
+def consolidate_run(assembly_path: str, procedure_path: str | None = None,
+                    out_path: str | None = None) -> dict:
+    """EXPERIMENTAL / inspection. Flatten a Vehicle Assembly (+ optional Procedure)
+    into one parsfile by recursively inlining every PARSFILE link. NOTE: a naive
+    link-order inline does NOT satisfy CarSim's parse-ORDER for complex vehicles (a
+    table can be referenced before its cross-link definition), so the result is often
+    NOT directly runnable -- for a runnable headless config, edit a baked
+    DATA\\Results\\<run>\\Run_all.par instead, or use the GUI 'Generate Files' after
+    set_link. Useful for inspecting/diffing the full inlined config. Returns {path,
+    n_lines, n_inlined, runnable, note}."""
+    return cc.consolidate_run(assembly_path, procedure_path=procedure_path,
+                              out_path=out_path)
 
 
 if __name__ == "__main__":

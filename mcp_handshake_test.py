@@ -19,7 +19,7 @@ async def main():
             tools = await session.list_tools()
             names = [t.name for t in tools.tools]
             print("TOOLS:", names)
-            # 10 core + 7 database/dictionary tools.
+            # 10 core + 7 database/dictionary + 6 table/link/assembly tools.
             expected = {
                 "carsim_info", "launch_gui", "list_examples", "read_parsfile",
                 "write_parsfile", "run_solver", "generate_simfile",
@@ -27,6 +27,8 @@ async def main():
                 "list_libraries", "browse_library", "find_dataset",
                 "get_dataset", "set_dataset", "describe_keyword",
                 "build_keyword_dictionary",
+                "set_table", "get_links", "set_link", "resolve_assembly",
+                "clone_dataset", "consolidate_run",
             }
             missing = expected - set(names)
             assert not missing, f"missing tools: {missing}"

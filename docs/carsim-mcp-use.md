@@ -2,15 +2,15 @@
 
 > 面向后续 agent / 自己的实战手册：**怎么用这个 CarSim MCP 改参数、跑工况、读结果**，以及
 > **每一个真实踩过的坑**（带现象、根因、修法）。配套：`carsim-matlab.md`（联合仿真细节）。
-> 最后更新 2026-06-12。canonical 工程 = `E:\desktop\file\train\dist\carsim-mcp\`（已开源
+> 最后更新 2026-06-15。canonical 工程 = `E:\desktop\file\train\dist\carsim-mcp\`（已开源
 > github.com/AngelZhaksy/carsim-mcp-Carsim-matlab-mcp-server）；安装目录见末尾。
 
 ---
 
 ## 0. 一句话
 
-CarSim 的 **GUI 闭源，但数据全是纯文本 parsfile**。这个 MCP 给 agent 17 个工具，让你**不开 GUI、纯代码**
-就能：导航数据库 → 改任意参数（悬架/质量/电机…）→ headless 跑求解器 → 读 ERD 结果 / 联合仿真。
+CarSim 的 **GUI 闭源，但数据全是纯文本 parsfile**。这个 MCP 给 agent 23 个工具，让你**不开 GUI、纯代码**
+就能：导航数据库 → 改任意参数（悬架/质量/电机，含**表格**）→ **组装整车**（换动力总成/电池等）→ headless 跑求解器 → 读 ERD / 联合仿真。
 
 ---
 
@@ -25,7 +25,7 @@ CarSim 的 **GUI 闭源，但数据全是纯文本 parsfile**。这个 MCP 给 a
 
 ---
 
-## 2. 17 个工具速查
+## 2. 23 个工具速查
 
 | 类 | 工具 | 用途 |
 |---|---|---|
@@ -36,13 +36,21 @@ CarSim 的 **GUI 闭源，但数据全是纯文本 parsfile**。这个 MCP 给 a
 | **导航** | `browse_library(lib, cat?)` | 列某库/类下的数据集 + 路径 |
 | **导航** | `find_dataset(query)` | 全库模糊搜"在哪改 X" |
 | **读写** | `get_dataset(path)` | 结构化读：身份+参数（带释义+单位）+表格 |
-| **读写** | `set_dataset(path, edits)` | 改参数（自动 .bak / 解只读 / 刷 #Modified） |
+| **读写** | `set_dataset(path, edits)` | 改**标量**参数（自动 .bak / 解只读 / 刷 #Modified） |
+| **读写** | `set_table(path, kw, rows)` ★ | 改**表格**块（电机扭矩/电池OCV/轮胎/弹簧曲线）；写后自动校验 |
+| **读写** | `write_parsfile(..., occurrence=N)` | 底层改值，`occurrence` 指定第N处（重复关键字如 IDIFF） |
 | **读写** | `describe_keyword(kw)` | 查关键字释义+单位 |
 | **读写** | `build_keyword_dictionary()` | 建本地关键字字典（一次性） |
-| **读写** | `read_parsfile`/`write_parsfile` | 底层关键字读/改（上层用 get/set_dataset 更好） |
+| **组装** | `get_links(path)` ★ | 列数据集的子系统链接（转向/悬架/动力总成…）+ 槽位标签 |
+| **组装** | `set_link(path, new_par, slot/index)` ★ | **换某个子系统**（如把整车动力总成换成 EV）+ 自动更 #BlueLink |
+| **组装** | `resolve_assembly(path, depth)` | 递归展开整车装配树（整车→动力总成→电池/电机表） |
+| **组装** | `clone_dataset(src, new_dataset?)` | 复制成**新数据集**（新 #FileID），不再只能改自带的 |
+| **组装** | `consolidate_run(...)` ⚠实验 | 展平装配树成单文件（**复杂车多半跑不了**，见坑#13；仅供检视） |
 | **求解** | `run_solver(simfile)` | headless 跑求解器（不碰 MATLAB） |
-| **求解** | `read_results(path)` | 解析 ERD(.vs/.vsb) 或 .mat → 各通道 min/max/final |
+| **求解** | `read_results(path, pattern?, names_only?)` | 解析 ERD/.mat；`pattern` 过滤通道（千通道大模型必用），`names_only` 只列名 |
 | **联合** | `generate_simfile` / `scaffold_cosim` / `run_cosim_headless` | 联合仿真（详见 carsim-matlab.md） |
+
+> ★ = 2026-06-15 新增"改表格 + 组装整车"层。这层让 agent 能改物理表格、把整车拆开重组。
 
 ---
 
@@ -68,6 +76,38 @@ set_dataset(path, {"M_SU":"1500","H_CG_SU":"530"})   # 改值 + 自动 .bak + �
 | 联合仿真 IO | `IO_Channels` | import/export 通道 |
 
 > 不懂关键字？`describe_keyword("IZZ_SU")` 直接给释义+单位。
+
+> ⚠️ `set_dataset` 只改**标量行**（`关键字 值`）。电机扭矩曲线、电池 OCV、轮胎 Pacejka、弹簧/阻尼**是表格**，
+> 用 `set_table`（见下）。重复关键字（`IDIFF`、每轴 `PARSFILE`）用 `write_parsfile(..., occurrence=N)`。
+
+---
+
+## 3.5 工作流 A2：改表格 + 组装整车（新层，2026-06-15）
+
+**改表格**（物理特性多在表格里）：
+```text
+get_dataset(path)                    # tables 字段列出所有表格名
+set_table(path, "F_JNC_STOP_TABLE", [[90,0],[100,5000],[120,20000]], method="LINEAR")
+#   → 改的行写回，自动 .bak、自动校验(verified=true)。occurrence=N 选第N个同名表
+```
+
+**组装整车 = 换某个子系统的链接**（CarSim 整车是一串 `PARSFILE` 链接，每条带槽位标签）：
+```text
+get_links(vehicle_assembly_par)      # → [{index, slot:"Powertrain", dataset:"43/40kW Hybrid"}, {slot:"Tire"...}, ...]
+set_link(assembly, "Powertrain\\4wd\\4WD_<EV配置>.par", slot="Powertrain")
+#   → 把整车动力总成换成 EV（自动同步 #BlueLink）。也可按 index 定位
+resolve_assembly(assembly, max_depth=3)   # 递归看整车装配树：整车→动力总成→HEV(电池+电机)→表
+```
+
+**造新数据集**（不想改自带的只读库文件）：
+```text
+clone_dataset(src_par, new_dataset="My EV AWD", new_category="Custom EV")  # 给新 #FileID
+```
+
+> **EV 建模就靠这层**：`set_link` 换 `Powertrain\4wd` 下的 EV 配置（"300kW 双电机 AWD"/"20kW×2"/"10kW×4"），
+> `set_table` 改电机效率/电池 OCV-SOC 表，`get_links` 看 HEV 数据集里电池+电机的链接。
+> ⚠️ **改完整车装配后想 headless 跑**：`consolidate_run` 展平复杂车多半过不了 CarSim 的 parse-order（见坑#13）。
+> 可靠路径仍是**改一个已烘焙的 `Run_all.par`**（§4），或在 GUI 里 set_link 后 "Generate Files" 让 CarSim 排序。
 
 ---
 
@@ -148,6 +188,7 @@ read_results("<工作目录>\out\LastRun.vs")     # → 各通道 min/max/final
 | 10 | **自行车模型参数硬套** | kf/kr 找不到对应车辆关键字 | PRD 的 `kf/kr`(轴侧偏刚度) 是 2DOF 抽象，CarSim 里对应**轮胎数据集**，不是单个关键字。能干净映射的是质量/惯量/质心/轴距；侧偏刚度要改轮胎。CarSim 是全多体，不是自行车模型 |
 | 11 | **CarSim 不建模电机 FOC** | 想验 dq 电流环/SVPWM 取不到 | CarSim 把电机当**力矩/效率 MAP**，无 PMSM dq/FOC/SVPWM。电驱细节要在 MATLAB/Simulink 做 |
 | 12 | **GUI 开不到指定界面** | 想"打开某 input/output 窗口" | `CarSim_64.exe` **无 CLI 打开指定界面**（只到上次 Run Control）。本 MCP 走纯代码改 parsfile，不依赖 GUI |
+| 13 | **`consolidate_run` 复杂车跑不了** | 展平后 `run_solver` 报 `SET_UNITS_TABLE_ROW ... <表名> doesn't exist` | 朴素链接顺序内联**不满足 CarSim 的 parse-ORDER**（跨链接的表被提前引用）。`consolidate_run` 仅供**检视/diff**，标了 `runnable:"unverified"`。要 headless 跑新配置：改一个已烘焙的 `Run_all.par`，或 GUI 里 set_link 后 "Generate Files" 让 CarSim 排序 |
 
 ---
 

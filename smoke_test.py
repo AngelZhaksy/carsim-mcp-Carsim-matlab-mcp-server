@@ -118,6 +118,47 @@ def test_keyword_dictionary():
     print(f"keyword_dict: ok ({len(d)} keywords; M_SU = {hit.get('unit')})")
 
 
+def test_links_and_table():
+    """Link/assembly layer + set_table + clone_dataset. Skipped without a CarSim DB."""
+    import os
+    import shutil
+    import stat
+    try:
+        db = cc._db_dir()
+    except FileNotFoundError:
+        print("links_table: skipped (no CarSim database)")
+        return
+    # get_links on a Vehicle Assembly (should expose a Powertrain slot)
+    asm = cc.browse_library("Vehicles", "Assembly", limit=300)["datasets"]
+    if not asm:
+        print("links_table: skipped (no Vehicle Assembly datasets)")
+        return
+    links = cc.get_links(asm[0]["file"])
+    assert links["n"] > 0, "assembly had no links"
+    tree = cc.resolve_assembly(asm[0]["file"], max_depth=2)
+    assert tree.get("children"), "resolve_assembly returned no children"
+
+    with tempfile.TemporaryDirectory() as d:
+        # clone_dataset gives a fresh #FileID
+        cl = cc.clone_dataset(asm[0]["file"], out_path=str(Path(d) / "clone.par"),
+                              new_dataset="smoke clone")
+        assert cl["identity"]["dataset"] == "smoke clone", cl
+        assert cl["file_id"] != Path(asm[0]["file"]).stem, "FileID not refreshed"
+
+        # set_table on a dataset that has a table (Suspensions Jounce_Rebound)
+        jr = cc.browse_library("Suspensions", "Jounce_Rebound", limit=5)["datasets"]
+        if jr:
+            tmp = str(Path(d) / "jr.par")
+            shutil.copy2(jr[0]["file"], tmp)
+            os.chmod(tmp, os.stat(tmp).st_mode | stat.S_IWRITE)
+            ds = cc.get_dataset(tmp, annotate=False)
+            tkey = next(iter(ds["tables"]), None)
+            if tkey:
+                res = cc.set_table(tmp, tkey, [[10, 0], [20, 5000]])
+                assert res["verified"] and res["n_rows"] == 2, res
+    print("links_table: ok (get_links/resolve_assembly/clone_dataset/set_table)")
+
+
 if __name__ == "__main__":
     test_resolve_paths()
     test_parsfile()
@@ -127,4 +168,5 @@ if __name__ == "__main__":
     test_db_navigation()
     test_set_dataset_roundtrip()
     test_keyword_dictionary()
+    test_links_and_table()
     print("\nALL SMOKE TESTS PASSED")

@@ -16,7 +16,7 @@ filesystem, orchestrated by the agent.
 
 ---
 
-## Features / tools (17)
+## Features / tools (23)
 
 **Toolchain & examples**
 
@@ -37,7 +37,18 @@ filesystem, orchestrated by the agent.
 | `set_dataset` | Edit scalar params (`{M_SU: 1500, H_CG_SU: 530}`), bump `#Modified`, auto `.bak`. Handles read-only library files. |
 | `describe_keyword` | Look up a keyword's meaning + unit (`describe_keyword('M_SU')` → sprung mass, kg). |
 | `build_keyword_dictionary` | Build the local keyword dictionary from CarSim's own echo files (run once per install). |
-| `read_parsfile` / `write_parsfile` | Low-level keyword read/edit (auto `.bak`). `get_dataset`/`set_dataset` are the friendlier layer. |
+| `read_parsfile` / `write_parsfile` | Low-level keyword read/edit (auto `.bak`; `write_parsfile` takes `occurrence=N` for repeated keywords). |
+
+**Edit tables & assemble vehicles** — beyond scalars
+
+| Tool | What it does |
+|---|---|
+| `set_table` | Rewrite a TABLE block (motor torque map, tire Pacejka carpet, battery OCV-vs-SOC, spring/damper curve). Verifies after write. |
+| `get_links` | List a dataset's subsystem links (`PARSFILE` lines) with slot labels + identity — what an assembly contains. |
+| `set_link` | Swap one subsystem link (e.g. drop an EV powertrain into a vehicle); updates the `#BlueLink` too. |
+| `resolve_assembly` | Recurse the full vehicle tree (Vehicle → Powertrain → HEV(battery/motors) → tables). |
+| `clone_dataset` | Copy a dataset to a new `.par` with a fresh `#FileID` + identity. |
+| `consolidate_run` | *Experimental/inspection*: flatten the link tree into one file (not parse-order-runnable for complex vehicles — edit a baked `Run_all.par` to run). |
 
 **Solve & co-simulate**
 
@@ -46,7 +57,7 @@ filesystem, orchestrated by the agent.
 | `run_solver` | Headless CarSim solve via the CLI solver wrapper (no MATLAB, no GUI). |
 | `generate_simfile` | Produce a co-sim `simfile` by templating from a GUI-generated one. |
 | `scaffold_cosim` | Generate a ready-to-run co-sim package (`.slx` or `.m` driver + `run_cosim.m`). |
-| `read_results` | Parse CarSim ERD (`.vs` JSON + `.vsb` float32) or a `.mat` into per-channel `{len,min,max,final}`. |
+| `read_results` | Parse CarSim ERD (`.vs` JSON + `.vsb` float32) or a `.mat` into per-channel `{len,min,max,final,unit}`. `pattern=` filters channels (a full run can have 1000+); `names_only=` lists names fast. |
 | `run_cosim_headless` | Optional fallback: run a driver via `matlab -batch` (unattended). |
 
 The recommended co-sim path runs the driver through the **MATLAB MCP**, not this fallback.
