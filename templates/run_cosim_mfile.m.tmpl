@@ -4,6 +4,11 @@
 addpath('@SOLVER_DIR@');            % vs_sf.mexw64 and CarSim solver helpers
 simfile = '@SIMFILE@';             %#ok<NASGU>  pass this to your controller as needed
 stop_time = '@STOP@';              %#ok<NASGU>
+% CarSim S-Functions (vs_sf/vs_ctl/vs_dyn) read the simfile by relative name, so
+% run from the simfile's folder (the CarSim database working dir) -- same as the
+% .slx driver. Harmless if your controller uses the absolute 'simfile' path.
+sdir = fileparts(simfile);
+if ~isempty(sdir), cd(sdir); end
 
 @CONTROLLER_CALL@
 

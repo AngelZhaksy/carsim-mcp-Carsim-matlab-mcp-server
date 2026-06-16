@@ -386,11 +386,27 @@ def scaffold_cosim(out_dir: str, simfile: str, kind: str = "slx",
     results_path = str(out / "results.mat")
     runner_m = str(out / "run_cosim.m")
 
+    # Soft pre-flight checks so a wrong path fails HERE (clear message) rather than
+    # later inside MATLAB with a cryptic error. Non-blocking: the simfile may be
+    # generated after scaffolding, so we warn rather than raise.
+    warnings = []
+    if not Path(simfile).exists():
+        warnings.append(f"simfile does not exist yet: {simfile} "
+                        "(generate it before running run_cosim.m)")
+    if not Path(solver_dir).is_dir():
+        warnings.append(f"CarSim Simulink solver dir missing: {solver_dir}")
+
     if kind == "slx":
         if model is None:
             src = os.path.join(paths["simulink_examples_dir"]["path"], "example.mdl")
+            if not Path(src).exists():
+                raise FileNotFoundError(
+                    f"default co-sim model not found: {src}. Pass model= explicitly "
+                    "(a .slx/.mdl containing the CarSim vs_sf S-Function).")
             model = str(out / "example.mdl")
             shutil.copy2(src, model)
+        elif not Path(model).exists():
+            warnings.append(f"model does not exist: {model}")
         text = _fill_template("run_cosim_slx.m.tmpl", {
             "@SOLVER_DIR@": solver_dir,
             "@SIMFILE@": simfile,
@@ -414,7 +430,8 @@ def scaffold_cosim(out_dir: str, simfile: str, kind: str = "slx",
 
     Path(runner_m).write_text(text, encoding="utf-8")
     return {"runner_m": runner_m, "model": model, "simfile": simfile,
-            "results_path": results_path, "solver_dir": solver_dir}
+            "results_path": results_path, "solver_dir": solver_dir,
+            "warnings": warnings}
 
 
 # --------------------------------------------------------------------------- #
